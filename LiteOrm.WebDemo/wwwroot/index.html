@@ -249,12 +249,17 @@
                 </div>
             </section>
         </div>
+        <footer class="site-footer">
+            <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">苏ICP备2026041415号</a>
+        </footer>
     </main>
 
     <button id="backToTop" data-i18n-title="backToTop" title="回到顶部">↑</button>
 
     <script>
         var currentLang = "zh";
+        var README_HTML = "";
+        var currentDocPath = null;
 
         const I18N = {
             zh: {
@@ -597,7 +602,10 @@
             applyLang();
             renderConditions();
             renderSorts();
-            loadDocsIndex();
+            loadDocsIndex().then(function () {
+                if (currentDocPath) loadDocPage(currentDocPath, currentLang);
+                else showReadme();
+            });
         });
         document.getElementById("langEn").addEventListener("click", function () {
             if (currentLang === "en") return;
@@ -607,13 +615,17 @@
             applyLang();
             renderConditions();
             renderSorts();
-            loadDocsIndex();
+            loadDocsIndex().then(function () {
+                if (currentDocPath) loadDocPage(currentDocPath, currentLang);
+                else showReadme();
+            });
         });
 
         async function loadDocsIndex() {
             const host = document.getElementById("docsIndex");
             try {
                 const index = await (await fetch(API.docsIndex + "?lang=" + encodeURIComponent(currentLang))).json();
+                README_HTML = index.readmeHtml || "";
                 host.innerHTML = "";
                 const parts = (index.chapters || []);
                 if (parts.length === 0) { host.innerHTML = '<div class="docs-empty">' + t("loading") + '</div>'; return; }
@@ -656,15 +668,30 @@
                     host.appendChild(groupDiv);
                 });
                 if (firstPath !== null) {
-                    const firstItem = host.querySelector('.docs-item[data-path="' + firstPath + '"]');
-                    switchSection("docs", { docItem: firstItem });
-                    loadDocPage(firstPath, currentLang);
+                    // 仅切换到文档区，不自动加载首个文档；默认内容由 parseInitialHash/showReadme 决定
+                    switchSection("docs");
                 } else {
                     switchSection("docs");
                 }
             } catch (err) {
                 host.innerHTML = '<div class="docs-empty">' + err.message + "</div>";
             }
+        }
+
+        function showReadme() {
+            currentDocPath = null;
+            switchSection("docs");
+            const title = document.getElementById("docsTitle");
+            const summary = document.getElementById("docsSummary");
+            const body = document.getElementById("docsBody");
+            title.textContent = "LiteOrm";
+            summary.textContent = currentLang === "zh" ? "LiteOrm 在线文档与演示" : "LiteOrm Online Docs & Demo";
+            body.innerHTML = README_HTML || "";
+            document.querySelectorAll(".sidebar-link, .docs-item").forEach(function (el) { el.classList.remove("active"); });
+            try { window.location.replace("#/"); } catch (e) { }
+            bindDocArticleLinks();
+            renderMermaid();
+            window.scrollTo({ top: 0, behavior: "smooth" });
         }
 
         async function renderMermaid() {
@@ -686,6 +713,7 @@
         }
 
         async function loadDocPage(path, lang, fragment) {
+            currentDocPath = path;
             const title = document.getElementById("docsTitle");
             const summary = document.getElementById("docsSummary");
             const body = document.getElementById("docsBody");
@@ -1087,7 +1115,7 @@
         });
 
         loadDocsIndex().then(function () {
-            parseInitialHash();
+            if (!parseInitialHash()) showReadme();
         });
 
         // 回到顶部
@@ -1099,8 +1127,5 @@
             window.scrollTo({ top: 0, behavior: "smooth" });
         });
     </script>
-    <footer class="site-footer">
-        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">苏ICP备2026041415号</a>
-    </footer>
 </body>
 </html>
