@@ -1,10 +1,11 @@
-using System.Text.Json.Serialization;
 using LiteOrm;
 using LiteOrm.Remote.Server;
+using LiteOrm.Service;
 using LiteOrm.SqlToExpr;
 using LiteOrm.WebDemo.Data;
 using LiteOrm.WebDemo.Endpoints;
 using LiteOrm.WebDemo.Services;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -35,6 +36,7 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
+RemoteInvocationRequestConverter.DefaultNamespace = "LiteOrm.WebDemo.Models";
 
 var app = builder.Build();
 
