@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <PackageReference Include="LiteOrm" Version="8.0.18" />
+    <PackageReference Include="LiteOrm.Remote.Server" Version="8.0.1" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.14" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
     <PackageReference Include="Markdig" Version="0.37.0" />

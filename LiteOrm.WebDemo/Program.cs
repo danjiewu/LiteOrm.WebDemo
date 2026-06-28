@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using LiteOrm;
+using LiteOrm.Remote.Server;
 using LiteOrm.SqlToExpr;
 using LiteOrm.WebDemo.Data;
 using LiteOrm.WebDemo.Endpoints;
@@ -8,6 +9,7 @@ using LiteOrm.WebDemo.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Host.RegisterLiteOrm();
+builder.Services.AddRemoteService(config => config.ServiceTypeResolver = new DefaultServiceTypeResolver("LiteOrm.WebDemo.Services", "LiteOrm.WebDemo.Models"));
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<SqlConversionService>();
 builder.Services.AddSingleton(_ =>
@@ -45,6 +47,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapDemoEndpoints();
+app.MapRemoteInvokeEndpoint();
 app.MapSqlToExprEndpoints();
 app.MapExprQueryEndpoints();
 app.MapDocsEndpoints();

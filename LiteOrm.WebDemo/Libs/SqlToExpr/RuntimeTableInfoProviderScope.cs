@@ -11,10 +11,11 @@ internal sealed class RuntimeTableInfoProviderScope : IDisposable
 
     public RuntimeTableInfoProviderScope(ISqlBuilder sqlBuilder)
     {
+        ServiceCollection services = new ServiceCollection();
+        services.AddSingleton(new StaticSqlBuilderFactory(sqlBuilder));
+        services.AddSingleton(new StaticDataSourceProvider(sqlBuilder));
         _previous = TableInfoProvider.Default;
-        TableInfoProvider.Default = new AttributeTableInfoProvider(
-            new StaticSqlBuilderFactory(sqlBuilder),
-            new StaticDataSourceProvider(sqlBuilder));
+        TableInfoProvider.Default = new AttributeTableInfoProvider(services.BuildServiceProvider());
     }
 
     public void Dispose()
