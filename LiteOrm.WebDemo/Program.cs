@@ -10,10 +10,10 @@ using System.Text.Json.Serialization;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Host.RegisterLiteOrm();
-builder.Services.AddRemoteService(config => config.ServiceTypeResolver = new DefaultServiceTypeResolver("LiteOrm.WebDemo.Services", "LiteOrm.WebDemo.Models"));
-builder.Services.AddMemoryCache();
-builder.Services.AddSingleton<SqlConversionService>();
-builder.Services.AddSingleton(_ =>
+builder.Services.AddRemoteServer()
+.AddMemoryCache()
+.AddSingleton<SqlConversionService>()
+.AddSingleton(_ =>
 {
     var searchPaths = new[]
     {
@@ -36,7 +36,6 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
-RemoteInvocationRequestConverter.DefaultNamespace = "LiteOrm.WebDemo.Models";
 
 var app = builder.Build();
 
