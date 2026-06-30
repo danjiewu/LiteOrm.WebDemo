@@ -8,6 +8,7 @@ using System.Threading;
 
 namespace LiteOrm.WebDemo.Services;
 
+[Service]
 public interface IDemoOrderService :
     IEntityServiceAsync<DemoOrder>,
     IEntityViewServiceAsync<DemoOrderView>

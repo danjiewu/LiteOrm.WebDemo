@@ -4,6 +4,7 @@ using LiteOrm.WebDemo.Models;
 
 namespace LiteOrm.WebDemo.Services;
 
+[Service]
 public interface IDemoDepartmentService :
     IEntityServiceAsync<DemoDepartment>,
     IEntityViewServiceAsync<DemoDepartment>

@@ -4,6 +4,7 @@ using LiteOrm.WebDemo.Models;
 
 namespace LiteOrm.WebDemo.Services;
 
+[Service]
 public interface IDemoAuthSessionService :
     IEntityServiceAsync<DemoAuthSession>,
     IEntityViewServiceAsync<DemoAuthSession>

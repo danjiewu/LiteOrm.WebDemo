@@ -6,6 +6,7 @@ using LiteOrm.WebDemo.Models;
 
 namespace LiteOrm.WebDemo.Services;
 
+[Service]
 public interface IDemoExprQueryHistoryService :
     IEntityServiceAsync<DemoExprQueryHistory>,
     IEntityViewServiceAsync<DemoExprQueryHistory>
