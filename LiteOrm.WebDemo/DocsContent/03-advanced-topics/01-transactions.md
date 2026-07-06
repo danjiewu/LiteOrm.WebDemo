@@ -4,12 +4,12 @@ LiteOrm 支持两种事务管理方式：声明式事务和手动事务。
 
 ## 场景选型
 
-| 场景 | 推荐方式 | 原因 |
-|------|----------|------|
-| 标准业务服务方法 | 声明式事务 | 代码简洁，边界清晰 |
-| 需要显式控制提交/回滚时机 | 手动事务 | 控制粒度更高 |
-| 组合多个 DAO / Service 写入 | 声明式事务优先 | 更贴近业务封装 |
-| 基础设施层、批处理、特殊事务边界 | 手动事务 | 更适合细粒度控制 |
+| 场景 | 推荐方式 |
+|------|----------|
+| 标准业务服务方法 | 声明式事务 |
+| 需要显式控制提交/回滚时机 | 手动事务 |
+| 组合多个 DAO / Service 写入 | 声明式事务优先 |
+| 基础设施层、批处理、特殊事务边界 | 手动事务 |
 
 ## 1. 声明式事务
 
@@ -30,32 +30,42 @@ public class UserService : EntityService<User>
     [Transaction]
     public async Task CreateUserWithOrder(User user, Order order)
     {
-        await InsertAsync(user);
+        await InsertAsync(user);                  // 操作 User 表
         order.UserId = user.Id;
-        await _orderService.InsertAsync(order);
+        await _orderService.InsertAsync(order);   // 操作 Order 表
     }
 }
 ```
 
 ### 1.2 嵌套调用
 
-声明式事务支持嵌套，嵌套方法使用同一事务：
+声明式事务支持嵌套，嵌套方法复用同一事务，不重复 Begin/Commit：
 
 ```csharp
-[Transaction]
-public async Task TransferMoney(long fromId, long toId, decimal amount)
+public class OrderService : EntityService<Order>
 {
-    var fromAccount = await _accountService.GetObjectAsync(fromId);
-    var toAccount = await _accountService.GetObjectAsync(toId);
+    private readonly IOrderItemService _orderItemService;
 
-    fromAccount.Balance -= amount;
-    toAccount.Balance += amount;
+    [Transaction]
+    public async Task SubmitOrderAsync(Order order, List<OrderItem> items)
+    {
+        await InsertAsync(order);
 
-    await _accountService.Update(fromAccount);
-    await Update(fromAccount);  // 同一事务中
+        foreach (var item in items)
+        {
+            item.OrderId = order.Id;
+            await _orderItemService.AppendAsync(item);  // 内层 [Transaction] 复用外层
+        }
+    }
+}
 
-    await _accountService.Update(toAccount);
-    await Update(toAccount);    // 同一事务中
+public class OrderItemService : EntityService<OrderItem>, IOrderItemService
+{
+    [Transaction]
+    public async Task AppendAsync(OrderItem item)
+    {
+        await InsertAsync(item);  // 内层结束不提交，事务由最外层统一管理
+    }
 }
 ```
 
@@ -64,6 +74,7 @@ public async Task TransferMoney(long fromId, long toId, decimal amount)
 - `[Transaction]` 特性需要 Castle.Core 动态代理支持
 - 方法必须是 `public` 且通过接口调用才能生效
 - 避免在事务方法里启动脱离当前调用链的后台任务；这类任务不会自动继承当前事务边界
+- 嵌套调用时内层的 `IsolationLevel` 不会生效，整个事务沿用外层隔离级别
 
 ### 1.4 业务闭环示例
 
@@ -71,12 +82,7 @@ public async Task TransferMoney(long fromId, long toId, decimal amount)
 [Transaction]
 public async Task SubmitOrderAsync(CreateOrderInput input)
 {
-    var order = new Order
-    {
-        UserId = input.UserId,
-        Amount = input.Amount
-    };
-
+    var order = new Order { UserId = input.UserId, Amount = input.Amount };
     await _orderService.InsertAsync(order);
 
     foreach (var item in input.Items)
@@ -97,11 +103,9 @@ public async Task SubmitOrderAsync(CreateOrderInput input)
 }
 ```
 
-这个模式适合“主表 + 明细 + 审计日志”一类的典型业务事务。
+### 1.5 失败回滚示例
 
-### 1.5 来自 Demo 的回滚示例
-
-`LiteOrm.Demo\Demos\TransactionDemo.cs` 里演示了一个很实用的失败回滚场景：先创建用户，再插入一条故意不合法的销售记录，让事务自动回滚。
+下面是一个实用的失败回滚场景：先创建用户，再插入一条故意不合法的销售记录，让事务自动回滚。
 
 ```csharp
 var newUser = new User { UserName = "ThreeTierUser", Age = 25 };
@@ -115,8 +119,6 @@ bool success = await factory.BusinessService
     .RegisterUserWithInitialSaleAsync(newUser, initialSale);
 ```
 
-这个例子很适合验证“异常发生后，主流程已插入的数据是否也被撤回”。
-
 ## 2. 手动事务
 
 通过 `SessionManager` 手动控制事务。
@@ -128,7 +130,6 @@ var sessionManager = SessionManager.Current;
 sessionManager.BeginTransaction();
 try
 {
-    // 执行多个操作
     await userService.InsertAsync(user);
     await orderService.InsertAsync(order);
 
@@ -141,14 +142,14 @@ catch
 }
 ```
 
-### 2.2 事务隔离级别
+### 2.2 指定隔离级别
 
 ```csharp
 var sessionManager = SessionManager.Current;
 sessionManager.BeginTransaction(IsolationLevel.ReadCommitted);
 try
 {
-    // 操作
+    await userService.InsertAsync(user);
     sessionManager.Commit();
 }
 catch
@@ -158,7 +159,7 @@ catch
 }
 ```
 
-### 2.3 查询也可以纳入事务边界
+### 2.3 查询纳入事务边界
 
 ```csharp
 var sessionManager = SessionManager.Current;
@@ -177,38 +178,90 @@ catch
 
 ### 2.4 与声明式事务的取舍
 
-- 如果业务边界天然就是一个 Service 方法，优先用声明式事务。
-- 如果你需要在循环、批次或中间状态上决定何时提交，改用手动事务更合适。
-- 无论哪种方式，都建议把真正的事务边界控制在业务应用层，而不是控制器层。
+- 业务边界天然就是一个 Service 方法时，优先用声明式事务。
+- 需要在循环、批次或中间状态上决定何时提交时，改用手动事务。
+- 事务边界应控制在业务应用层，而不是控制器层。
 
-## 3. 事务传播行为
+## 3. 子作用域事务隔离
 
-LiteOrm 的事务传播行为：
+当需要让一段逻辑运行在**独立事务**中（独立提交、回滚、隔离级别），创建新的 DI 作用域即可。子作用域内的 `SessionManager.Current` 与父作用域互不影响。
 
-| 场景 | 行为 |
-|------|------|
-| 无现有事务 | 创建新事务 |
-| 有现有事务 | 加入现有事务（嵌套） |
-| 事务失败 | 全部回滚 |
+### 3.1 基本用法
 
-## 4. 事务与 SessionManager
+```csharp
+public class ReportService
+{
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IMainService _mainService;
 
-LiteOrm 使用 `SessionManager` 管理数据库连接及事务：
+    public ReportService(IServiceScopeFactory scopeFactory, IMainService mainService)
+    {
+        _scopeFactory = scopeFactory;
+        _mainService = mainService;
+    }
 
-- 支持跨数据库的事务
-- 事务开始时，当前 Scope 的 SessionManager 已有的数据库连接都将进入事务
-- 在事务过程中获取的数据库连接也会自动加上事务
-- 当前 Scope 下 LiteOrm 的所有数据库操作都会自动受当前事务管理
-- 如需隔离事务，需要创建新的 Scope
+    public async Task RunIndependentTxnAsync()
+    {
+        // 父作用域：可能在事务中
+        await _mainService.UpdateAsync(record);
 
-## 5. `timestamp` 与事务的关系
+        // 子作用域：完全独立的事务
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var isolatedSvc = scope.ServiceProvider.GetRequiredService<IAuditService>();
+            // 即使父作用域后续回滚，这里的审计日志也会独立提交
+            await isolatedSvc.RecordAsync("processed", record.Id);
+        }
+
+        // 父作用域继续工作
+        await _mainService.UpdateAsync(other);
+    }
+}
+```
+
+### 3.2 独立隔离级别
+
+子作用域内可使用任意隔离级别，与父作用域互不影响：
+
+```csharp
+using (var scope = _scopeFactory.CreateScope())
+{
+    var sessionManager = scope.ServiceProvider.GetRequiredService<SessionManager>();
+    sessionManager.BeginTransaction(IsolationLevel.Serializable);
+    try
+    {
+        var svc = scope.ServiceProvider.GetRequiredService<IInventoryService>();
+        await svc.LockAndDecrementAsync(productId, quantity);
+        sessionManager.Commit();
+    }
+    catch
+    {
+        sessionManager.Rollback();
+        throw;
+    }
+}
+```
+
+### 3.3 跨作用域调用对比
+
+| 调用方式 | 是否共享事务 | 隔离级别 |
+|---------|-------------|---------|
+| `await _otherService.MethodAsync()` | 共享 | 复用外层 |
+| `using (scope = _scopeFactory.CreateScope())` | **独立** | 可单独指定 |
+
+### 3.4 注意事项
+
+- 子作用域必须 `Dispose`，否则 `SessionManager` 不会释放，连接不归还连接池。
+- 子作用域隔离的是数据库事务，不是并发控制；多个子作用域并行操作同一资源时仍需 `Serializable` 或行锁。
+
+## 4. `timestamp` 与事务的关系
 
 `timestamp` 乐观并发控制和事务不是互斥关系，它们解决的是两个不同问题：
 
 - 事务：保证一组操作要么一起成功，要么一起失败。
 - `timestamp`：防止“后提交覆盖先提交”的丢失更新。
 
-典型组合方式是：
+典型组合方式：
 
 1. 用事务包裹一个完整业务流程。
 2. 对关键实体更新时，使用 `ObjectDAO<T>.Update(entity, timestamp)` 或 `UpdateAsync(entity, timestamp)`。
@@ -238,9 +291,6 @@ public async Task<bool> RenameUserAsync(int id, string newName)
 
 ## 相关链接
 
-- [返回目录](../README.md)
-- [关联查询](../02-core-usage/06-associations.md)
+- [关联查询](../02-core-usage/08-associations.md)
 - [分表分库](./02-sharding-and-tableargs.md)
 - [性能优化](./03-performance.md)
-
-

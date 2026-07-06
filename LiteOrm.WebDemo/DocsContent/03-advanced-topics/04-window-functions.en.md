@@ -145,9 +145,9 @@ var sales = await saleService.SearchAs<SalesWindowView>(q => q
 );
 ```
 
-### 3.6 Registration and Query Flow from Demo
+### 3.6 Registration and Query Flow
 
-The following is organized from `LiteOrm.Demo\Demos\WindowFunctionDemo.cs`:
+A complete registration and query flow:
 
 ```csharp
 // Register handlers at application startup
@@ -267,7 +267,7 @@ The examples in this repository focus on `SumOver` and rely on `FunctionExpr.Ove
 ## Related Links
 
 - [Back to docs hub](../README.md)
-- [Associations](../02-core-usage/06-associations.en.md)
+- [Associations](../02-core-usage/08-associations.en.md)
 - [Expression Extension](../04-extensibility/01-expression-extension.en.md)
 - [Function Validator](../04-extensibility/02-function-validator.en.md)
 

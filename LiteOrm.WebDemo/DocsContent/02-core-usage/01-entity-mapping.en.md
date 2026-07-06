@@ -51,6 +51,8 @@ public class User
 | `Name` | Database column name. |
 | `IsPrimaryKey` | Whether it is a primary key. |
 | `IsIdentity` | Whether it is an identity column. |
+| `IdentityStart` | Identity column start value, default `1`. Only takes effect on databases that support start value (SQL Server, Dameng, Oracle); MySQL via table-level `AUTO_INCREMENT = n` option; SQLite does not support customization. |
+| `IdentityIncreasement` | Identity column increment value, default `1`. Only takes effect on databases that support increment (SQL Server, Dameng, Oracle); MySQL requires session variable `auto_increment_increment`; SQLite does not support customization. |
 | `DataType` | Serialization type, used for complex object storage. |
 
 ## `[PropertyOrder]` Attribute
@@ -128,6 +130,6 @@ For more details, see [Sharding and TableArgs](../03-advanced-topics/02-sharding
 
 - [Back to docs hub](../README.md)
 - [View Models and Services](./02-view-models-and-services.en.md)
-- [Associations](./06-associations.en.md)
+- [Associations](./08-associations.en.md)
 - [Glossary](../05-reference/03-glossary.en.md)
 

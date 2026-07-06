@@ -4,12 +4,12 @@ LiteOrm supports two transaction management approaches: declarative transactions
 
 ## Choosing Between Approaches
 
-| Scenario | Recommended Approach | Reason |
-|----------|---------------------|--------|
-| Standard business service methods | Declarative | Clean code, clear boundaries |
-| Need explicit control over commit/rollback timing | Manual | Finer granularity |
-| Combining multiple DAO/Service writes | Declarative preferred | Closer to business encapsulation |
-| Infrastructure layer, batch processing, special transaction boundaries | Manual | Better for fine-grained control |
+| Scenario | Recommended Approach |
+|----------|----------------------|
+| Standard business service methods | Declarative |
+| Need explicit control over commit/rollback timing | Manual |
+| Combining multiple DAO/Service writes | Declarative preferred |
+| Infrastructure layer, batch processing, special transaction boundaries | Manual |
 
 ## 1. Declarative Transactions
 
@@ -30,32 +30,42 @@ public class UserService : EntityService<User>
     [Transaction]
     public async Task CreateUserWithOrder(User user, Order order)
     {
-        await InsertAsync(user);
+        await InsertAsync(user);                  // operates on User table
         order.UserId = user.Id;
-        await _orderService.InsertAsync(order);
+        await _orderService.InsertAsync(order);   // operates on Order table
     }
 }
 ```
 
 ### 1.2 Nested Calls
 
-Declarative transactions support nesting. Nested methods use the same transaction:
+Declarative transactions support nesting. Nested methods reuse the same transaction without repeated Begin/Commit:
 
 ```csharp
-[Transaction]
-public async Task TransferMoney(long fromId, long toId, decimal amount)
+public class OrderService : EntityService<Order>
 {
-    var fromAccount = await _accountService.GetObjectAsync(fromId);
-    var toAccount = await _accountService.GetObjectAsync(toId);
+    private readonly IOrderItemService _orderItemService;
 
-    fromAccount.Balance -= amount;
-    toAccount.Balance += amount;
+    [Transaction]
+    public async Task SubmitOrderAsync(Order order, List<OrderItem> items)
+    {
+        await InsertAsync(order);
 
-    await _accountService.Update(fromAccount);
-    await Update(fromAccount);  // Same transaction
+        foreach (var item in items)
+        {
+            item.OrderId = order.Id;
+            await _orderItemService.AppendAsync(item);  // Inner [Transaction] reuses outer
+        }
+    }
+}
 
-    await _accountService.Update(toAccount);
-    await Update(toAccount);    // Same transaction
+public class OrderItemService : EntityService<OrderItem>, IOrderItemService
+{
+    [Transaction]
+    public async Task AppendAsync(OrderItem item)
+    {
+        await InsertAsync(item);  // Inner exit does not commit; managed by outermost
+    }
 }
 ```
 
@@ -64,6 +74,7 @@ public async Task TransferMoney(long fromId, long toId, decimal amount)
 - `[Transaction]` attribute requires Castle.Core dynamic proxy support
 - Methods must be `public` and called through interface to take effect
 - Avoid starting background tasks that are detached from the current call chain within transaction methods; such tasks will not automatically inherit the current transaction boundary
+- In nested calls, the inner `IsolationLevel` is not applied; the whole transaction uses the outer method's isolation level
 
 ### 1.4 Business Complete Example
 
@@ -71,12 +82,7 @@ public async Task TransferMoney(long fromId, long toId, decimal amount)
 [Transaction]
 public async Task SubmitOrderAsync(CreateOrderInput input)
 {
-    var order = new Order
-    {
-        UserId = input.UserId,
-        Amount = input.Amount
-    };
-
+    var order = new Order { UserId = input.UserId, Amount = input.Amount };
     await _orderService.InsertAsync(order);
 
     foreach (var item in input.Items)
@@ -97,11 +103,9 @@ public async Task SubmitOrderAsync(CreateOrderInput input)
 }
 ```
 
-This pattern is suitable for typical business transactions like "main table + details + audit log."
+### 1.5 Failure Rollback Example
 
-### 1.5 Rollback Example from Demo
-
-`LiteOrm.Demo\Demos\TransactionDemo.cs` demonstrates a useful failure rollback scenario: create a user first, then insert an intentionally invalid sales record to trigger automatic transaction rollback.
+Below is a practical failure rollback scenario: create a user first, then insert an intentionally invalid sales record to trigger automatic transaction rollback.
 
 ```csharp
 var newUser = new User { UserName = "ThreeTierUser", Age = 25 };
@@ -115,8 +119,6 @@ bool success = await factory.BusinessService
     .RegisterUserWithInitialSaleAsync(newUser, initialSale);
 ```
 
-This example is ideal for verifying "whether data already inserted in the main flow is also rolled back after an exception occurs."
-
 ## 2. Manual Transactions
 
 Control transactions manually through `SessionManager`.
@@ -128,7 +130,6 @@ var sessionManager = SessionManager.Current;
 sessionManager.BeginTransaction();
 try
 {
-    // Execute multiple operations
     await userService.InsertAsync(user);
     await orderService.InsertAsync(order);
 
@@ -141,14 +142,14 @@ catch
 }
 ```
 
-### 2.2 Transaction Isolation Level
+### 2.2 Specify Isolation Level
 
 ```csharp
 var sessionManager = SessionManager.Current;
 sessionManager.BeginTransaction(IsolationLevel.ReadCommitted);
 try
 {
-    // Operations
+    await userService.InsertAsync(user);
     sessionManager.Commit();
 }
 catch
@@ -179,29 +180,81 @@ catch
 
 - If the business boundary is naturally a Service method, prefer declarative transactions.
 - If you need to decide when to commit in loops, batches, or intermediate states, manual transactions are more suitable.
-- Regardless of approach, it's recommended to keep the actual transaction boundary at the business application layer, not the controller layer.
+- Keep the actual transaction boundary at the business application layer, not the controller layer.
 
-## 3. Transaction Propagation Behavior
+## 3. Sub-scope Transaction Isolation
 
-LiteOrm's transaction propagation behavior:
+When a piece of logic must run in an **independent transaction** (independent commit, rollback, isolation level), create a new DI scope. The `SessionManager.Current` inside the child scope does not affect the parent scope.
 
-| Scenario | Behavior |
-|----------|----------|
-| No existing transaction | Creates new transaction |
-| Has existing transaction | Joins existing transaction (nested) |
-| Transaction failure | Full rollback |
+### 3.1 Basic Usage
 
-## 4. Transactions and SessionManager
+```csharp
+public class ReportService
+{
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IMainService _mainService;
 
-LiteOrm uses `SessionManager` to manage database connections and transactions:
+    public ReportService(IServiceScopeFactory scopeFactory, IMainService mainService)
+    {
+        _scopeFactory = scopeFactory;
+        _mainService = mainService;
+    }
 
-- Supports cross-database transactions
-- When a transaction begins, all database connections already held by the current Scope's SessionManager enter the transaction
-- Database connections acquired during the transaction are automatically added to the transaction
-- All LiteOrm database operations under the current Scope are automatically managed by the current transaction
-- If transaction isolation is needed, create a new Scope
+    public async Task RunIndependentTxnAsync()
+    {
+        // Parent scope: may be inside a transaction
+        await _mainService.UpdateAsync(record);
 
-## 5. How `timestamp` Relates to Transactions
+        // Child scope: a fully independent transaction
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var isolatedSvc = scope.ServiceProvider.GetRequiredService<IAuditService>();
+            // Even if the parent scope rolls back later, this audit log is committed independently
+            await isolatedSvc.RecordAsync("processed", record.Id);
+        }
+
+        // Parent scope continues
+        await _mainService.UpdateAsync(other);
+    }
+}
+```
+
+### 3.2 Independent Isolation Level
+
+Inside a child scope you can use any isolation level, independent of the parent scope:
+
+```csharp
+using (var scope = _scopeFactory.CreateScope())
+{
+    var sessionManager = scope.ServiceProvider.GetRequiredService<SessionManager>();
+    sessionManager.BeginTransaction(IsolationLevel.Serializable);
+    try
+    {
+        var svc = scope.ServiceProvider.GetRequiredService<IInventoryService>();
+        await svc.LockAndDecrementAsync(productId, quantity);
+        sessionManager.Commit();
+    }
+    catch
+    {
+        sessionManager.Rollback();
+        throw;
+    }
+}
+```
+
+### 3.3 Cross-scope Call Comparison
+
+| Call Style | Shares Transaction | Isolation Level |
+|------------|-------------------|-----------------|
+| `await _otherService.MethodAsync()` | Yes | Reuses outer |
+| `using (scope = _scopeFactory.CreateScope())` | **Independent** | Can be specified separately |
+
+### 3.4 Notes
+
+- The child scope must be `Dispose`d, otherwise the `SessionManager` is not released and the connection is not returned to the pool.
+- The child scope isolates the database transaction, not concurrency control. Multiple child scopes operating on the same resource in parallel still require `Serializable` or row locks.
+
+## 4. How `timestamp` Relates to Transactions
 
 `timestamp`-based optimistic concurrency and transactions are complementary, not competing, mechanisms:
 
@@ -238,8 +291,6 @@ Recommendation:
 
 ## Related Links
 
-- [Back to docs hub](../README.md)
-- [Associations](../02-core-usage/06-associations.en.md)
+- [Associations](../02-core-usage/08-associations.en.md)
 - [Sharding and Table Routing](./02-sharding-and-tableargs.en.md)
 - [Performance Optimization](./03-performance.en.md)
-
