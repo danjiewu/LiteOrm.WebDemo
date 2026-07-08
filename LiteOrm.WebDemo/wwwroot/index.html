@@ -105,6 +105,7 @@
                     <a class="docs-item" data-section="expr-query" data-i18n="navExprQuery">Expr 查询</a>
                 </div>
             </div>
+            <a class="sidebar-link" id="navChangelog" data-i18n="navChangelog">变更日志</a>
         </nav>
     </aside>
     <main class="main">
@@ -267,6 +268,7 @@
                 navSqlConvert: "SQL 转 Expr",
                 navExprQuery: "Expr 查询",
                 navTools: "在线工具",
+                navChangelog: "变更日志",
                 searchMenu: "搜索菜单...",
                 backToTop: "回到顶部",
                 loading: "加载中...",
@@ -338,6 +340,7 @@
                 navSqlConvert: "SQL to Expr",
                 navExprQuery: "Expr Query",
                 navTools: "Online Tools",
+                navChangelog: "Changelog",
                 searchMenu: "Search menu...",
                 backToTop: "Back to Top",
                 loading: "Loading...",
@@ -553,6 +556,13 @@
         // 菜单搜索过滤
         document.getElementById("menuSearch").addEventListener("input", function () {
             const q = this.value.trim().toLowerCase();
+            // 处理独立的侧栏链接（如变更日志）
+            menu.querySelectorAll(":scope > .sidebar-link").forEach(function (el) {
+                if (!q) { el.classList.remove("filter-item-hidden"); return; }
+                var text = (el.textContent || "").toLowerCase();
+                if (text.indexOf(q) >= 0) el.classList.remove("filter-item-hidden");
+                else el.classList.add("filter-item-hidden");
+            });
             menu.querySelectorAll(".sidebar-group").forEach(function (group) {
                 // 先恢复所有子项可见
                 group.querySelectorAll(".docs-item, .sidebar-link").forEach(function (el) {
@@ -603,7 +613,8 @@
             renderConditions();
             renderSorts();
             loadDocsIndex().then(function () {
-                if (currentDocPath) loadDocPage(currentDocPath, currentLang);
+                if (currentDocPath === "CHANGELOG") loadChangelog();
+                else if (currentDocPath) loadDocPage(currentDocPath, currentLang);
                 else showReadme();
             });
         });
@@ -616,7 +627,8 @@
             renderConditions();
             renderSorts();
             loadDocsIndex().then(function () {
-                if (currentDocPath) loadDocPage(currentDocPath, currentLang);
+                if (currentDocPath === "CHANGELOG") loadChangelog();
+                else if (currentDocPath) loadDocPage(currentDocPath, currentLang);
                 else showReadme();
             });
         });
@@ -693,6 +705,22 @@
             renderMermaid();
             window.scrollTo({ top: 0, behavior: "smooth" });
         }
+
+        async function loadChangelog() {
+            document.querySelectorAll(".sidebar-link, .docs-item").forEach(function (el) { el.classList.remove("active"); });
+            document.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.remove("active"); });
+            document.getElementById("section-docs").classList.add("active");
+            await loadDocPage("CHANGELOG", currentLang);
+            // loadDocPage 完成后会清除菜单高亮，重新标记变更日志链接
+            document.querySelectorAll(".sidebar-link, .docs-item").forEach(function (el) { el.classList.remove("active"); });
+            const nav = document.getElementById("navChangelog");
+            if (nav) nav.classList.add("active");
+        }
+
+        document.getElementById("navChangelog").addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            loadChangelog();
+        });
 
         async function renderMermaid() {
             const body = document.getElementById("docsBody");
@@ -816,6 +844,7 @@
             }
             if (hash === "#/sql-convert") { switchSection("sql-convert"); return true; }
             if (hash === "#/expr-query") { switchSection("expr-query"); return true; }
+            if (hash === "#/changelog") { loadChangelog(); return true; }
             return false;
         }
 
