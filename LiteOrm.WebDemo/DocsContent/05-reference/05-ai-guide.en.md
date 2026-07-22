@@ -105,22 +105,6 @@ public class Log { ... }
 public class Legacy { ... }
 ```
 
-### `[Table]` Attribute
-
-| Parameter | Description |
-|-----------|-------------|
-| `Name` | Database table name, supports placeholder for sharding. |
-| `DataSource` | Specifies the data source for the current entity. |
-| `SyncTable` | Entity-level table-structure sync mode, enum `SyncTableMode` (`Default` / `Never` / `Always`), defaults to `Default`. `Never`/`Always` overrides the data-source-level `SyncTable` config. |
-
-```csharp
-[Table("Logs", SyncTable = SyncTableMode.Always)] // Always auto-create, even when the data source has SyncTable=false
-public class Log { ... }
-
-[Table("Legacy", SyncTable = SyncTableMode.Never)] // Never auto-create, even when the data source has SyncTable enabled
-public class Legacy { ... }
-```
-
 > `SyncTable` decision priority: `OnTableSyncing` event > `[Table(SyncTable = ...)]` (`Never`/`Always`) > pool-level `SyncTable`.
 
 ## 3. Service definitions
