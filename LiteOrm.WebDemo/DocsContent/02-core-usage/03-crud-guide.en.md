@@ -253,7 +253,7 @@ Usage notes:
 userService.UpdateAll(
     u => new User { Age = 30 },
     u => u.UserName == "UpdateDemo_Bob",
-    "Users_2026" // dynamic table name
+    "2026" // table name argument, fills {0} in [Table("Users_{0}")]
 );
 ```
 
@@ -309,7 +309,7 @@ This example is ideal for validating that batch interfaces cover the entire path
 ```csharp
 using static LiteOrm.Common.Expr;
 await userService.DeleteAsync(u => u.CreateTime < DateTime.Today.AddYears(-1));
-await objectDao.Delete(Prop("Age") < 18 & Prop("UserName").StartsWith("Temp"));
+objectDao.Delete(Prop("Age") < 18 & Prop("UserName").StartsWith("Temp"));
 ```
 
 ### Conditional Delete Example
