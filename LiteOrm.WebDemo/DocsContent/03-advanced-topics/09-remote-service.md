@@ -206,6 +206,8 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `InvokePath` | `string` | `"api/remote/invoke"` | 远程调用 HTTP 端点路径 |
+| `SignInPath` | `string` | `"api/remote/signin"` | 登录（签发身份票据）的 HTTP 端点路径 |
+| `EnableAuthentication` | `bool` | `true` | 是否启用 Cookie 身份认证。启用后 SignIn 端点通过 `HttpContext.SignInAsync` 创建身份票据，Invoke 端点通过 `HttpContext.User` 恢复用户上下文 |
 | `JsonSerializerOptions` | `JsonSerializerOptions` | `UnsafeRelaxedJsonEscaping` + 大小写不敏感 | JSON 序列化选项 |
 | `ServiceTypeResolver` | `IRemoteServiceTypeResolver` | `DefaultServiceTypeResolver` | 服务类型解析器实例 |
 | `ServiceTypeResolverFactory` | `Func<IServiceProvider, IRemoteServiceTypeResolver>?` | `null` | 解析器工厂，优先级高于 `ServiceTypeResolver` |
@@ -218,12 +220,16 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 |------|------|------|
 | `RemoteServiceUri` | `Uri?` | 远程服务基础地址。设置后自动注册基于 `HttpClient` 的 `HttpRemoteServiceTransport` |
 | `RemoteServicePath` | `string` | 相对于 `RemoteServiceUri` 的请求路径，默认 `api/remote/invoke` |
+| `RemoteSignInPath` | `string` | 相对于 `RemoteServiceUri` 的登录路径，默认 `api/remote/signin`（仅在使用内置 `StaticCredentialsResolver` 时生效） |
+| `CredentialsResolver` | `ICredentialsResolver?` | 凭据解析器实例。每次 `InvokeAsync` 时通过该解析器获取身份票据并写入 HTTP 请求头；为 `null` 表示匿名连接 |
+| `CredentialsResolverFactory` | `Func<IServiceProvider, ICredentialsResolver>?` | 凭据解析器工厂，接收 `IServiceProvider`，返回 `ICredentialsResolver` 实例。优先级高于 `CredentialsResolver`，便于在解析器中注入其他 DI 服务 |
 | `ConfigureHttpClient` | `Action<HttpClient>?` | 配置内部 `HttpClient`（超时、默认请求头等） |
-| `Transport` | `IRemoteServiceTransport?` | 自定义传输层实例。设置后优先于 `RemoteServiceUri` |
+| `Transport` | `IRemoteServiceTransport?` | 自定义传输层实例。设置后优先于 `RemoteServiceUri`；若同时设置了 `TransportFactory`，则工厂优先 |
+| `TransportFactory` | `Func<IServiceProvider, IRemoteServiceTransport>?` | 自定义传输层工厂，接收 `IServiceProvider`，返回 `IRemoteServiceTransport` 实例。优先级高于 `Transport`，便于在传输层中注入其他 DI 服务（如 `ICredentialsResolver`） |
 | `AutoRegisterEntityServices` | `bool` | 是否自动注册所有实体服务为远程代理，默认 `true` |
 | `Assemblies` | `Assembly[]?` | 自定义接口扫描程序集列表，未设置则扫描所有引用程序集 |
 
-> **必填项**：`Transport` 或 `RemoteServiceUri` 至少设置一个，否则注册时抛出 `InvalidOperationException`。
+> **必填项**：`Transport`、`TransportFactory` 或 `RemoteServiceUri` 至少设置一个，否则注册时抛出 `InvalidOperationException`。
 
 #### HTTP 客户端调优示例
 
@@ -287,11 +293,430 @@ var user = await factory.DemoUserService.GetByUserNameAsync("alice");
 
 ---
 
-## 五、类型解析与服务名
+## 五、身份认证
+
+LiteOrm.Remote 使用 **`ICredentialsResolver` + `IRemoteAuthenticationHandler`** 双端协作的票据机制标识用户身份，替代传统的 SessionID/Connect 流程。客户端通过 `ICredentialsResolver` 获取身份票据，每次 `InvokeAsync` 时将票据写入 HTTP 请求头；服务端通过 `IRemoteAuthenticationHandler` 在 SignIn 端点签发票据，由 ASP.NET Core 认证中间件在 Invoke 端点恢复 `HttpContext.User`。框架不提供登出（SignOut）端点与接口方法——票据过期与清除由调用方自行处理。
+
+支持两种授权模式：
+
+| 授权模式 | `AuthGrantType` | 必填字段 | 适用场景 |
+|---------|----------------|---------|---------|
+| 密码模式 | `Password`（默认） | `Username` + `Password` | 认证用户身份，有明确的用户名/密码 |
+| 客户端凭据模式 | `ClientCredentials` | `ClientId` + `ClientSecret` | 认证客户端/应用身份，无具体用户（如服务间调用） |
+
+### 5.1 工作原理
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant Resolver as ICredentialsResolver
+    participant Server as 服务端
+    participant Handler as IRemoteAuthenticationHandler
+
+    Note over Client,Resolver: 1. 登录阶段（一次性）
+    Client->>Server: POST /api/remote/signin {GrantType, Username/ClientId, Password/ClientSecret, Extensions}
+    Server->>Server: 按 GrantType 校验必填字段是否完整
+    alt 字段缺失
+        Server-->>Client: 401 Unauthorized（提示缺失字段）
+    else 字段完整
+        Server->>Handler: SignInAsync(credentials)
+        Handler->>Handler: SignInManager.PasswordSignInAsync → Set-Cookie
+        alt 验证失败
+            Handler-->>Server: null
+            Server-->>Client: 401 Unauthorized
+        else 验证通过
+            Handler-->>Server: 票据字符串（Cookie 串）
+            Server-->>Client: 200 OK { Ticket: "..." }
+        end
+    end
+    Client->>Resolver: 保存票据到本地
+
+    Note over Client,Server: 2. 调用阶段（每次 InvokeAsync）
+    Client->>Resolver: GetTicketAsync()
+    Resolver-->>Client: 票据字符串
+    Client->>Server: POST /api/remote/invoke（Cookie 头携带票据）
+    Server->>Server: 认证中间件恢复 HttpContext.User
+    Server->>Server: 执行远程调用
+    Server-->>Client: RemoteInvocationResponse
+```
+
+### 5.2 服务端实现 `IRemoteAuthenticationHandler`
+
+服务端通过 `IRemoteAuthenticationHandler` 处理登录。框架不自动注册 handler，调用方需手动注册——通常使用内置的 `IdentityRemoteAuthenticationHandler<TUser>`，也可直接实现接口自定义认证流程。
+
+```csharp
+public interface IRemoteAuthenticationHandler
+{
+    // 校验凭据并签发票据；返回 null 表示校验失败
+    Task<string?> SignInAsync(RemoteCredentials credentials, CancellationToken cancellationToken = default);
+}
+```
+
+#### 方式一：使用 `IdentityRemoteAuthenticationHandler<TUser>`（基于 ASP.NET Core Identity）
+
+若服务端已配置 ASP.NET Core Identity，可直接使用框架提供的 `IdentityRemoteAuthenticationHandler<TUser>`。该实现从 DI 获取 `SignInManager<TUser>` 服务，在 `SignInAsync` 中调用 `PasswordSignInAsync` 校验用户名/密码，登录成功后从 `Set-Cookie` 响应头提取票据返回。
+
+```csharp
+using LiteOrm.Remote.Server;
+
+// 1. 配置 ASP.NET Core Identity
+builder.Services.AddIdentity<MyUser, MyRole>()
+    .AddEntityFrameworkStores<MyDbContext>();
+
+// 2. 注册 IdentityRemoteAuthenticationHandler<TUser>
+builder.Services.AddSingleton<IRemoteAuthenticationHandler, IdentityRemoteAuthenticationHandler<MyUser>>();
+
+// 3. 注册远程服务端（EnableAuthentication 设为 false，由 Identity 管理 Cookie 认证）
+builder.Services.AddRemoteServer(options =>
+{
+    options.EnableAuthentication = false;
+});
+```
+
+> `IdentityRemoteAuthenticationHandler<TUser>` 默认仅处理 `AuthGrantType.Password` 模式。如需支持 `ClientCredentials` 或自定义票据提取逻辑，继承该类重写 `SignInAsync` 即可。
+
+#### 方式二：直接实现 `IRemoteAuthenticationHandler`（JWT 方案）
+
+不使用 ASP.NET Core Identity 时，可直接实现接口完全自定义认证流程。下面以 **JWT** 方案为例：服务端校验凭据后签发 JWT token 返回客户端，客户端在 `InvokeAsync` 时将 token 写入 `Authorization: Bearer` 头，服务端通过 JWT Bearer 认证中间件恢复 `HttpContext.User`。
+
+**服务端配置与实现：**
+
+```csharp
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using LiteOrm.Common;
+using LiteOrm.Remote.Server;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.IdentityModel.Tokens;
+
+// 1. 配置 JWT Bearer 认证（替代默认 Cookie 认证）
+var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("Your-Secret-Key-At-Least-32-Chars!!"));
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = "LiteOrm.Remote",
+            ValidateAudience = true,
+            ValidAudience = "LiteOrm.Clients",
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = signingKey,
+        };
+    });
+
+// 2. 注册基于 JWT 的 IRemoteAuthenticationHandler
+builder.Services.AddSingleton<IRemoteAuthenticationHandler>(new JwtAuthHandler(signingKey));
+
+// 3. 注册远程服务端（关闭默认 Cookie 认证，由 JWT Bearer 接管）
+builder.Services.AddRemoteServer(options =>
+{
+    options.EnableAuthentication = false;
+});
+```
+
+```csharp
+/// <summary>
+/// 基于 JWT 的 IRemoteAuthenticationHandler 实现：校验凭据后签发 JWT token 返回。
+/// </summary>
+public class JwtAuthHandler : IRemoteAuthenticationHandler
+{
+    private const string Issuer = "LiteOrm.Remote";
+    private const string Audience = "LiteOrm.Clients";
+    private const int ExpiresMinutes = 60;
+
+    private readonly SigningCredentials _signingCredentials;
+    private readonly JwtSecurityTokenHandler _tokenHandler = new();
+
+    public JwtAuthHandler(SecurityKey signingKey)
+    {
+        _signingCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
+    }
+
+    public Task<string?> SignInAsync(RemoteCredentials credentials, CancellationToken cancellationToken = default)
+    {
+        // 自定义凭据校验逻辑（示例：固定用户名/密码，实际应查数据库）
+        if (credentials.GrantType != AuthGrantType.Password
+            || credentials.Username != "admin"
+            || credentials.Password != "pass")
+        {
+            return Task.FromResult<string?>(null);
+        }
+
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Name, credentials.Username!),
+            new Claim(ClaimTypes.Role, "Admin"),
+        };
+        var token = new JwtSecurityToken(
+            issuer: Issuer,
+            audience: Audience,
+            claims: claims,
+            expires: DateTime.UtcNow.AddMinutes(ExpiresMinutes),
+            signingCredentials: _signingCredentials);
+        return Task.FromResult<string?>(_tokenHandler.WriteToken(token));
+    }
+}
+```
+
+**客户端配置（JWT 写入 `Authorization` 头）：**
+
+```csharp
+var host = Host.CreateDefaultBuilder(args)
+    .RegisterLiteOrmRemote(opts =>
+    {
+        opts.RemoteServiceUri = new Uri("http://localhost:5000");
+
+        // 使用 CredentialsResolverFactory 注册 StaticCredentialsResolver
+        opts.CredentialsResolverFactory = sp =>
+        {
+            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+            opts.ConfigureHttpClient?.Invoke(httpClient);
+            return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
+        };
+
+        // 使用 TransportFactory 构造传输层，从 DI 解析 ICredentialsResolver 注入
+        opts.TransportFactory = sp =>
+        {
+            var resolver = sp.GetRequiredService<ICredentialsResolver>();
+            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+            opts.ConfigureHttpClient?.Invoke(httpClient);
+            return new HttpRemoteServiceTransport(httpClient, resolver)
+            {
+                TicketHeaderName = "Authorization",  // 默认 Cookie，JWT 改为 Authorization
+                TicketFormat = "Bearer {0}",         // 拼接为 "Bearer <token>"
+            };
+        };
+    })
+    .Build();
+
+// 启动时登录一次，获取 JWT token
+using var scope = host.Services.CreateScope();
+var resolver = scope.ServiceProvider.GetRequiredService<ICredentialsResolver>();
+await ((StaticCredentialsResolver)resolver).LoginAsync(new RemoteCredentials
+{
+    GrantType = AuthGrantType.Password,
+    Username = "admin",
+    Password = "pass",
+});
+```
+
+> 框架不提供登出端点。JWT 方案下，调用方仅需在客户端清除缓存的 token 即可；服务端可通过缩短 `ExpiresMinutes` 或维护 token 黑名单控制有效期。
+
+### 5.3 注册服务端
+
+```csharp
+// 注册 IRemoteAuthenticationHandler（在 AddRemoteServer 之前或之后均可）
+// 使用内置 IdentityRemoteAuthenticationHandler<TUser>：
+builder.Services.AddSingleton<IRemoteAuthenticationHandler, IdentityRemoteAuthenticationHandler<MyUser>>();
+// 或使用 JWT 自定义实现：
+// builder.Services.AddSingleton<IRemoteAuthenticationHandler>(new JwtAuthHandler(signingKey));
+builder.Services.AddRemoteServer();
+```
+
+> **框架不自动注册 `IRemoteAuthenticationHandler`**，调用方必须手动注册。未注册时 SignIn 端点返回 500 错误提示注册 handler。推荐使用内置的 `IdentityRemoteAuthenticationHandler<TUser>`，或直接实现接口自定义认证流程。
+
+### 5.4 客户端实现 `ICredentialsResolver`
+
+客户端通过 `ICredentialsResolver` 为每次 `InvokeAsync` 提供身份票据：
+
+```csharp
+public interface ICredentialsResolver
+{
+    // 返回身份票据字符串；返回 null 表示匿名调用（不带票据）
+    Task<string?> GetTicketAsync(CancellationToken cancellationToken = default);
+}
+```
+
+框架内置 `StaticCredentialsResolver`，适用于单用户场景（后台服务、桌面客户端）：通过 `LoginAsync` 向服务端 SignIn 端点提交凭据，登录成功后服务端返回的票据被保存到本地，后续 `GetTicketAsync` 直接返回该票据。
+
+#### 通过 `LiteOrmOptions` 注册
+
+使用 `CredentialsResolverFactory` 工厂注册 `StaticCredentialsResolver`，由 DI 容器统一管理生命周期，便于在传输层中通过 `ICredentialsResolver` 接口解析注入：
+
+```csharp
+var host = Host.CreateDefaultBuilder(args)
+    .RegisterLiteOrmRemote(opts =>
+    {
+        opts.RemoteServiceUri = new Uri("http://localhost:5000");
+
+        // 使用 CredentialsResolverFactory 注册 StaticCredentialsResolver
+        opts.CredentialsResolverFactory = sp =>
+        {
+            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+            opts.ConfigureHttpClient?.Invoke(httpClient);
+            return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
+        };
+    })
+    .Build();
+
+// 启动时登录一次（从 DI 容器解析出 resolver 实例）
+using (var scope = host.Services.CreateScope())
+{
+    var resolver = scope.ServiceProvider.GetRequiredService<ICredentialsResolver>();
+    await ((StaticCredentialsResolver)resolver).LoginAsync(new RemoteCredentials
+    {
+        GrantType = AuthGrantType.Password,
+        Username = "admin",
+        Password = "pass",
+    });
+}
+// 后续业务调用中，HttpRemoteServiceTransport 在每次 InvokeAsync 时自动通过 ICredentialsResolver 取出票据写入请求头
+```
+
+> - `CredentialsResolver` 与 `CredentialsResolverFactory` 同时设置时，工厂优先
+> - 不设置（`null`）表示匿名连接，`HttpRemoteServiceTransport` 不写入票据请求头
+> - `StaticCredentialsResolver` 内部使用 `SemaphoreSlim` 串行化登录，是线程安全的；`GetTicketAsync` 读取缓存的票据引用，可并发调用
+
+### 5.5 多用户场景：自定义 `ICredentialsResolver`
+
+`StaticCredentialsResolver` 整个进程共享一份票据，无法区分多用户。当 Web 后端需要以「当前请求所属终端用户」的身份调用远程数据服务时（BFF / 网关转发场景），实现自定义的 `ICredentialsResolver`，从 `IHttpContextAccessor` 解析当前用户票据：
+
+```mermaid
+graph LR
+    Browser["浏览器（保存登录票据）"] -->|HTTP 请求带 Cookie| Web["Web 后端（BFF）"]
+    Web -->|HttpContext 解析当前用户| Resolver["自定义 ICredentialsResolver"]
+    Web -->|业务调用| Transport["HttpRemoteServiceTransport（Singleton）"]
+    Transport -->|GetTicketAsync 取出当前用户票据| Resolver
+    Transport -->|InvokeAsync 写入 Cookie 头| Remote["远程数据服务"]
+```
+
+#### 配置
+
+```csharp
+builder.Services.AddHttpContextAccessor(); // 必须注册
+
+builder.Host.RegisterLiteOrmRemote(opts =>
+{
+    opts.RemoteServiceUri = new Uri("http://localhost:5000");
+    opts.CredentialsResolverFactory = sp =>
+    {
+        var httpCtxAccessor = sp.GetRequiredService<IHttpContextAccessor>();
+        return new HttpContextTicketResolver(httpCtxAccessor);
+    };
+    // 使用 TransportFactory 构造传输层，注入 ICredentialsResolver 并设置票据头
+    opts.TransportFactory = sp =>
+    {
+        var resolver = sp.GetRequiredService<ICredentialsResolver>();
+        var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+        opts.ConfigureHttpClient?.Invoke(httpClient);
+        return new HttpRemoteServiceTransport(httpClient, resolver)
+        {
+            TicketHeaderName = "Cookie",   // 转发浏览器 Cookie 到远程服务
+            TicketFormat = "{0}",
+        };
+    };
+});
+
+// 自定义 ICredentialsResolver：从 HttpContext 读取当前用户的票据
+public class HttpContextTicketResolver : ICredentialsResolver
+{
+    private readonly IHttpContextAccessor _accessor;
+    public HttpContextTicketResolver(IHttpContextAccessor accessor) => _accessor = accessor;
+
+    public Task<string?> GetTicketAsync(CancellationToken cancellationToken = default)
+    {
+        var request = _accessor.HttpContext?.Request;
+        // 从浏览器 Cookie 中取出名为 RemoteTicket 的远程服务票据
+        if (request is null || !request.Cookies.TryGetValue("RemoteTicket", out var ticket))
+            return Task.FromResult<string?>(null);
+        return Task.FromResult<string?>(ticket);
+    }
+}
+```
+
+#### Web 应用完整示例：BFF 转发浏览器 Cookie 到远程服务
+
+```csharp
+// 1. 登录端点：BFF 转发用户凭据到远程 SignIn，返回的票据写入浏览器 Cookie
+app.MapPost("/api/login", async (HttpContext ctx, LoginDto dto, IHttpClientFactory httpFactory) =>
+{
+    var client = httpFactory.CreateClient("Remote");
+    var json = JsonSerializer.Serialize(new RemoteCredentials
+    {
+        GrantType = AuthGrantType.Password,
+        Username = dto.Username,
+        Password = dto.Password,
+    });
+    var resp = await client.PostAsync("api/remote/signin",
+        new StringContent(json, Encoding.UTF8, "application/json"));
+    if (!resp.IsSuccessStatusCode)
+    {
+        ctx.Response.StatusCode = 401;
+        return;
+    }
+    var body = await resp.Content.ReadAsStringAsync();
+    using var doc = JsonDocument.Parse(body);
+    var ticket = doc.RootElement.GetProperty("Ticket").GetString();
+
+    // 将远程服务签发的票据写入浏览器 Cookie
+    ctx.Response.Cookies.Append("RemoteTicket", ticket!, new CookieOptions
+    {
+        HttpOnly = true,
+        MaxAge = TimeSpan.FromHours(2),
+    });
+});
+
+// 2. BFF 业务接口通过 LiteOrm 远程代理调用，票据自动转发
+app.MapGet("/api/me", async (HttpContext httpContext, IDemoUserService userService) =>
+{
+    // HttpContextTicketResolver 从 HttpContext.Request.Cookies["RemoteTicket"]
+    // 取出票据写入 Invoke 请求头，远程服务通过 Cookie 中间件恢复用户上下文
+    var user = await userService.GetByUserNameAsync("alice");
+    return Results.Ok(user);
+});
+```
+
+> **生产环境注意事项**：
+> - Cookie 中直接存票据不安全，建议加密存储或使用短时令牌
+> - 远程服务使用 JWT 等无状态认证时，自定义 `ICredentialsResolver` 返回 JWT，并设置 `HttpRemoteServiceTransport.TicketHeaderName = "Authorization"`、`TicketFormat = "Bearer {0}"`
+> - 票据过期导致远程服务返回 401 时，调用方需重新登录刷新票据
+
+### 5.6 服务端获取当前用户
+
+`Invoke` 端点通过 ASP.NET Core 认证中间件自动恢复 `HttpContext.User`。若需在业务代码中访问当前用户，通过 `IHttpContextAccessor` 获取：
+
+```csharp
+public class MyService
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    public MyService(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    public Task DoSomethingAsync()
+    {
+        var user = _httpContextAccessor.HttpContext?.User;
+        var userName = user?.Identity?.Name ?? "anonymous";
+        // ...
+    }
+}
+```
+
+### 5.7 禁用内置认证
+
+若需使用 JWT 或其他自定义认证方案，设置 `EnableAuthentication = false`：
+
+```csharp
+builder.Services.AddRemoteServer(options =>
+{
+    options.EnableAuthentication = false;
+});
+// 自行配置认证中间件
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(...);
+```
+
+---
+
+## 六、类型解析与服务名
 
 服务端根据请求中的 `ServiceName` 找到对应的 `Type`，客户端负责生成 `ServiceName`。理解这一节有助于自定义服务名和处理同名类型冲突。
 
-### 5.1 `TypeResolverHelper` —— 类型名 ↔ 类型双向解析
+### 6.1 `TypeResolverHelper` —— 类型名 ↔ 类型双向解析
 
 `LiteOrm.Common.TypeResolverHelper` 是公共工具类，提供类型名与 `Type` 的双向转换。
 
@@ -307,7 +732,7 @@ var user = await factory.DemoUserService.GetByUserNameAsync("alice");
 
 > **泛型类型名**：泛型类型应使用 CLR 名称格式 `Foo`1`（含反引号 arity 后缀），避免与同名的非泛型类型冲突。
 
-### 5.2 `IRemoteServiceTypeResolver` —— 服务端类型解析器
+### 6.2 `IRemoteServiceTypeResolver` —— 服务端类型解析器
 
 服务端通过 `IRemoteServiceTypeResolver` 将请求中的 `ServiceName` 解析为实际服务接口类型。
 
@@ -334,7 +759,7 @@ builder.Services.AddRemoteServer(options =>
 });
 ```
 
-### 5.3 `ServiceName` 一致性约定
+### 6.3 `ServiceName` 一致性约定
 
 - 两端均启用 `AutoRegisterEntityServices` 时框架自动保证一致
 - 手动注册自定义名称时，两端必须同时调用 `TypeResolverHelper.Register`
@@ -342,11 +767,11 @@ builder.Services.AddRemoteServer(options =>
 
 ---
 
-## 六、参数回写（ArgumentOut）
+## 七、参数回写（ArgumentOut）
 
 > 由于远程调用的**引用语义丢失**（参数在服务端是反序列化的新实例），服务端对参数的修改不会自动反映回客户端。`[ArgumentOut]` 系列特性用于声明需要回写的参数，由框架在服务端提取回写值、客户端应用回写值。
 
-### 6.1 `[IdentityOut]` —— 自增主键回写
+### 7.1 `[IdentityOut]` —— 自增主键回写
 
 `IEntityServiceAsync<T>` 的 `InsertAsync` / `BatchInsertAsync` 已默认标注 `[IdentityOut]`，调用后 Id 自动回写：
 
@@ -363,7 +788,7 @@ foreach (var o in orders)
 
 > **依赖**：`IdentityOutAttribute` 通过 `TableInfoProvider.Default` 解析 Identity 列，客户端与服务端均需注册（`LiteOrm` 主库的 `LiteOrmCoreInitializer` 会自动初始化）。
 
-### 6.2 `[CopyableOut]` —— 整体回写
+### 7.2 `[CopyableOut]` —— 整体回写
 
 适用于实现了 `ICopyable` 接口的参数类型。服务端直接返回参数对象本身，客户端通过 `ICopyable.CopyFrom` 整体复制到原始对象。
 
@@ -389,14 +814,14 @@ public interface ICopyableUserService
 }
 ```
 
-### 6.3 `ArgumentMode` 枚举
+### 7.3 `ArgumentMode` 枚举
 
 | 值 | 说明 | `ReturnType` 含义 |
 |----|------|-------------------|
 | `Single`（默认） | 单个参数回写 | 回写值的类型 |
 | `Collection` | 遍历 `IEnumerable`/`IList`，逐项调用 handler | **单个元素**的回写值类型（框架自动包装为 `List<ReturnType>` 序列化） |
 
-### 6.4 自定义回写处理器
+### 7.4 自定义回写处理器
 
 实现 `IArgumentOutHandler` 接口（位于 `LiteOrm.Common` 命名空间），通过 `[ArgumentOut(typeof(YourHandler), typeof(ReturnType))]` 标记参数：
 
@@ -442,13 +867,13 @@ public interface IMyService
 
 ---
 
-## 七、自定义传输层
+## 八、自定义传输层
 
 默认 HTTP 传输之外，可基于 named pipe、gRPC、消息队列等实现自定义传输。
 
-### 7.1 `IRemoteServiceTransport` 接口
+### 8.1 `IRemoteServiceTransport` 接口
 
-所有传输层实现的基础接口，只定义一个方法：
+所有传输层实现的基础接口，只包含调用方法，不再包含 Connect/会话管理：
 
 ```csharp
 public interface IRemoteServiceTransport
@@ -458,7 +883,9 @@ public interface IRemoteServiceTransport
 }
 ```
 
-### 7.2 `JsonRemoteServiceTransport` 抽象基类（推荐基类）
+身份认证票据由 `ICredentialsResolver` 在 `InvokeAsync` 内部写入请求头，传输层不再单独维护 Connect 会话。
+
+### 8.2 `JsonRemoteServiceTransport` 抽象基类（推荐基类）
 
 位于 `LiteOrm.Remote` 命名空间，基于 `System.Text.Json` 完成请求/响应的序列化与反序列化，**自定义传输层优先继承此类**，只需实现一个抽象方法：
 
@@ -466,10 +893,10 @@ public interface IRemoteServiceTransport
 public abstract class JsonRemoteServiceTransport : IRemoteServiceTransport
 {
     // 已实现：序列化 request → 调用 GetResponseJsonAsync → 反序列化 response
-    public async Task<RemoteInvocationResponse> InvokeAsync(
+    public virtual async Task<RemoteInvocationResponse> InvokeAsync(
         RemoteInvocationRequest request, CancellationToken cancellationToken = default);
 
-    // 子类只需实现：发送 JSON 字符串到远端，返回响应 JSON 字符串
+    // 子类需实现的抽象方法：发送调用请求、返回 JSON
     public abstract Task<string> GetResponseJsonAsync(
         string requestJson, CancellationToken cancellationToken = default);
 }
@@ -480,6 +907,8 @@ public abstract class JsonRemoteServiceTransport : IRemoteServiceTransport
 **继承示例**（基于 named pipe）：
 
 ```csharp
+using LiteOrm.Common;
+
 public class NamedPipeTransport : JsonRemoteServiceTransport
 {
     private readonly string _pipeName;
@@ -500,11 +929,25 @@ public class NamedPipeTransport : JsonRemoteServiceTransport
 opts.Transport = new NamedPipeTransport("liteorm-remote");
 ```
 
-### 7.3 默认 HTTP 传输（`HttpRemoteServiceTransport`）
+### 8.3 默认 HTTP 传输（`HttpRemoteServiceTransport`）
 
 `JsonRemoteServiceTransport` 的内置子类，基于 `HttpClient`。通过 `RemoteServiceUri` + `ConfigureHttpClient` 即可配置（详见 [4.2 节](#42-客户端配置liteormoptions)）。
 
-### 7.4 完全自定义传输
+构造函数接收 `ICredentialsResolver?`，在 `GetResponseJsonAsync` 中通过 `GetTicketAsync` 获取票据，按 `TicketHeaderName`（默认 `Cookie`）和 `TicketFormat`（默认 `{0}`）写入 HTTP 请求头：
+
+```csharp
+public sealed class HttpRemoteServiceTransport : JsonRemoteServiceTransport
+{
+    public string TicketHeaderName { get; set; } = "Cookie";   // 票据请求头名称
+    public string TicketFormat { get; set; } = "{0}";          // 票据格式化模板（如 "Bearer {0}"）
+
+    public HttpRemoteServiceTransport(HttpClient httpClient,
+        ICredentialsResolver? credentialsResolver = null,
+        string requestUri = "api/remote/invoke");
+}
+```
+
+### 8.4 完全自定义传输
 
 直接实现 `IRemoteServiceTransport`（不继承 `JsonRemoteServiceTransport`），需自行处理序列化：
 
@@ -515,6 +958,7 @@ public class MyTransport : IRemoteServiceTransport
         RemoteInvocationRequest request, CancellationToken cancellationToken)
     {
         // 需自行完成 request 序列化、传输、response 反序列化
+        // 票据可通过构造函数注入的 ICredentialsResolver 在调用时获取
     }
 }
 
@@ -523,7 +967,7 @@ opts.Transport = new MyTransport();
 
 ---
 
-## 八、序列化约束
+## 九、序列化约束
 
 远程服务调用**完全依赖对输入参数和返回值的 JSON 序列化**。理解以下约束有助于避免常见陷阱。
 
@@ -539,7 +983,7 @@ opts.Transport = new MyTransport();
 
 ---
 
-## 九、注意事项
+## 十、注意事项
 
 1. **`ForEachAsync` 不支持远程调用**：流式遍历需要持续返回数据，远程协议不支持，会抛出 `NotSupportedException`
 2. **`CancellationToken` 透传**：取消令牌不参与序列化，通过传输层端到端传递
@@ -562,7 +1006,7 @@ opts.Transport = new MyTransport();
 
 ---
 
-## 十、特点与优势
+## 十一、特点与优势
 
 | 特点 | 说明 |
 |------|------|

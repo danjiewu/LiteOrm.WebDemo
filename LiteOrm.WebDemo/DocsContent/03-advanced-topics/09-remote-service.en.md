@@ -206,6 +206,8 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `InvokePath` | `string` | `"api/remote/invoke"` | Remote invocation HTTP endpoint path |
+| `SignInPath` | `string` | `"api/remote/signin"` | HTTP endpoint path for signing in (issuing identity tickets) |
+| `EnableAuthentication` | `bool` | `true` | Enables Cookie authentication. When enabled, the SignIn endpoint creates an identity ticket via `HttpContext.SignInAsync`; the Invoke endpoint restores user context via `HttpContext.User` |
 | `JsonSerializerOptions` | `JsonSerializerOptions` | `UnsafeRelaxedJsonEscaping` + case-insensitive | JSON serialization options |
 | `ServiceTypeResolver` | `IRemoteServiceTypeResolver` | `DefaultServiceTypeResolver` | Service type resolver instance |
 | `ServiceTypeResolverFactory` | `Func<IServiceProvider, IRemoteServiceTypeResolver>?` | `null` | Resolver factory, takes precedence over `ServiceTypeResolver` |
@@ -218,12 +220,16 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 |----------|------|-------------|
 | `RemoteServiceUri` | `Uri?` | Remote service base address. When set, automatically registers `HttpRemoteServiceTransport` based on `HttpClient` |
 | `RemoteServicePath` | `string` | Request path relative to `RemoteServiceUri`, default `api/remote/invoke` |
+| `RemoteSignInPath` | `string` | Sign-in path relative to `RemoteServiceUri`, default `api/remote/signin` (only used with built-in `StaticCredentialsResolver`) |
+| `CredentialsResolver` | `ICredentialsResolver?` | Credentials resolver instance. On each `InvokeAsync`, the resolver provides an identity ticket written to the HTTP request header; `null` means anonymous connection |
+| `CredentialsResolverFactory` | `Func<IServiceProvider, ICredentialsResolver>?` | Credentials resolver factory. Receives `IServiceProvider`, returns `ICredentialsResolver` instance. Takes precedence over `CredentialsResolver`, allowing DI service injection in the resolver |
 | `ConfigureHttpClient` | `Action<HttpClient>?` | Configure the internal `HttpClient` (timeout, default headers, etc.) |
-| `Transport` | `IRemoteServiceTransport?` | Custom transport layer instance. Takes precedence over `RemoteServiceUri` when set |
+| `Transport` | `IRemoteServiceTransport?` | Custom transport layer instance. Takes precedence over `RemoteServiceUri`; if `TransportFactory` is also set, the factory takes precedence |
+| `TransportFactory` | `Func<IServiceProvider, IRemoteServiceTransport>?` | Custom transport layer factory. Receives `IServiceProvider`, returns `IRemoteServiceTransport` instance. Takes precedence over `Transport`, allowing DI service injection in the transport layer (e.g. `ICredentialsResolver`) |
 | `AutoRegisterEntityServices` | `bool` | Whether to auto-register all entity services as remote proxies, default `true` |
 | `Assemblies` | `Assembly[]?` | Custom interface scan assembly list; scans all referenced assemblies if not set |
 
-> **Required**: At least one of `Transport` or `RemoteServiceUri` must be set, otherwise `InvalidOperationException` is thrown during registration.
+> **Required**: At least one of `Transport`, `TransportFactory`, or `RemoteServiceUri` must be set, otherwise `InvalidOperationException` is thrown during registration.
 
 #### HTTP client tuning example
 
@@ -287,11 +293,432 @@ var user = await factory.DemoUserService.GetByUserNameAsync("alice");
 
 ---
 
-## 5. Type Resolution and ServiceName
+## 5. Authentication
+
+LiteOrm.Remote uses a **`ICredentialsResolver` + `IRemoteAuthenticationHandler`** ticket-based mechanism for user identity, replacing the traditional SessionID/Connect flow. The client obtains an identity ticket via `ICredentialsResolver` and writes it to the HTTP request header on each `InvokeAsync`; the server issues the ticket through `IRemoteAuthenticationHandler` at the SignIn endpoint, and the ASP.NET Core authentication middleware restores `HttpContext.User` at the Invoke endpoint. The framework does not provide a sign-out (SignOut) endpoint or interface method — ticket expiry and cleanup are handled by the caller.
+
+Two grant types are supported:
+
+| Grant Type | `AuthGrantType` | Required Fields | Use Case |
+|------------|----------------|-----------------|----------|
+| Password | `Password` (default) | `Username` + `Password` | Authenticating user identity with explicit credentials |
+| Client Credentials | `ClientCredentials` | `ClientId` + `ClientSecret` | Authenticating client/application identity without a specific user (e.g., service-to-service calls) |
+
+### 5.1 How It Works
+
+```mermaid
+sequenceDiagram
+    participant Client as Client
+    participant Resolver as ICredentialsResolver
+    participant Server as Server
+    participant Handler as IRemoteAuthenticationHandler
+
+    Note over Client,Resolver: 1. Login phase (one-time)
+    Client->>Server: POST /api/remote/signin {GrantType, Username/ClientId, Password/ClientSecret, Extensions}
+    Server->>Server: Validate required fields by GrantType
+    alt Missing fields
+        Server-->>Client: 401 Unauthorized (indicates missing field)
+    else Fields complete
+        Server->>Handler: SignInAsync(credentials)
+        Handler->>Handler: SignInManager.PasswordSignInAsync → Set-Cookie
+        alt Validation failed
+            Handler-->>Server: null
+            Server-->>Client: 401 Unauthorized
+        else Validation passed
+            Handler-->>Server: ticket string (Cookie string)
+            Server-->>Client: 200 OK { Ticket: "..." }
+        end
+    end
+    Client->>Resolver: save ticket locally
+
+    Note over Client,Server: 2. Invocation phase (each InvokeAsync)
+    Client->>Resolver: GetTicketAsync()
+    Resolver-->>Client: ticket string
+    Client->>Server: POST /api/remote/invoke (Cookie header carries ticket)
+    Server->>Server: Auth middleware restores HttpContext.User
+    Server->>Server: Execute remote invocation
+    Server-->>Client: RemoteInvocationResponse
+```
+
+### 5.2 Implementing `IRemoteAuthenticationHandler` on the Server
+
+The server handles sign-in through `IRemoteAuthenticationHandler`. The framework does not register a handler automatically — you must register one manually, typically the built-in `IdentityRemoteAuthenticationHandler<TUser>`, or implement the interface directly for a custom auth flow.
+
+```csharp
+public interface IRemoteAuthenticationHandler
+{
+    // Validate credentials and issue a ticket; return null on validation failure
+    Task<string?> SignInAsync(RemoteCredentials credentials, CancellationToken cancellationToken = default);
+}
+```
+
+#### Option 1: Use `IdentityRemoteAuthenticationHandler<TUser>` (based on ASP.NET Core Identity)
+
+If the server has ASP.NET Core Identity configured, you can use the framework-provided `IdentityRemoteAuthenticationHandler<TUser>` directly. It obtains the `SignInManager<TUser>` service from DI, calls `PasswordSignInAsync` in `SignInAsync` to validate username/password, and extracts the ticket from the `Set-Cookie` response header on success.
+
+```csharp
+using LiteOrm.Remote.Server;
+
+// 1. Configure ASP.NET Core Identity
+builder.Services.AddIdentity<MyUser, MyRole>()
+    .AddEntityFrameworkStores<MyDbContext>();
+
+// 2. Register IdentityRemoteAuthenticationHandler<TUser>
+builder.Services.AddSingleton<IRemoteAuthenticationHandler, IdentityRemoteAuthenticationHandler<MyUser>>();
+
+// 3. Register the remote server (set EnableAuthentication to false — Identity manages Cookie auth)
+builder.Services.AddRemoteServer(options =>
+{
+    options.EnableAuthentication = false;
+});
+```
+
+> `IdentityRemoteAuthenticationHandler<TUser>` only handles `AuthGrantType.Password` by default. To support `ClientCredentials` or custom ticket extraction, inherit and override `SignInAsync`.
+
+#### Option 2: Implement `IRemoteAuthenticationHandler` directly (JWT example)
+
+When not using ASP.NET Core Identity, implement the interface directly for full control over the auth flow. The following **JWT** example shows the server validating credentials and issuing a JWT token; the client writes the token to the `Authorization: Bearer` header on each `InvokeAsync`, and the server's JWT Bearer authentication middleware restores `HttpContext.User`.
+
+**Server configuration and implementation:**
+
+```csharp
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using LiteOrm.Common;
+using LiteOrm.Remote.Server;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.IdentityModel.Tokens;
+
+// 1. Configure JWT Bearer authentication (replaces the default Cookie auth)
+var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("Your-Secret-Key-At-Least-32-Chars!!"));
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = "LiteOrm.Remote",
+            ValidateAudience = true,
+            ValidAudience = "LiteOrm.Clients",
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = signingKey,
+        };
+    });
+
+// 2. Register the JWT-based IRemoteAuthenticationHandler
+builder.Services.AddSingleton<IRemoteAuthenticationHandler>(new JwtAuthHandler(signingKey));
+
+// 3. Register the remote server (disable default Cookie auth — JWT Bearer takes over)
+builder.Services.AddRemoteServer(options =>
+{
+    options.EnableAuthentication = false;
+});
+```
+
+```csharp
+/// <summary>
+/// JWT-based IRemoteAuthenticationHandler: validates credentials and issues a JWT token.
+/// </summary>
+public class JwtAuthHandler : IRemoteAuthenticationHandler
+{
+    private const string Issuer = "LiteOrm.Remote";
+    private const string Audience = "LiteOrm.Clients";
+    private const int ExpiresMinutes = 60;
+
+    private readonly SigningCredentials _signingCredentials;
+    private readonly JwtSecurityTokenHandler _tokenHandler = new();
+
+    public JwtAuthHandler(SecurityKey signingKey)
+    {
+        _signingCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
+    }
+
+    public Task<string?> SignInAsync(RemoteCredentials credentials, CancellationToken cancellationToken = default)
+    {
+        // Custom credential validation (example: fixed username/password; query your DB in production)
+        if (credentials.GrantType != AuthGrantType.Password
+            || credentials.Username != "admin"
+            || credentials.Password != "pass")
+        {
+            return Task.FromResult<string?>(null);
+        }
+
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Name, credentials.Username!),
+            new Claim(ClaimTypes.Role, "Admin"),
+        };
+        var token = new JwtSecurityToken(
+            issuer: Issuer,
+            audience: Audience,
+            claims: claims,
+            expires: DateTime.UtcNow.AddMinutes(ExpiresMinutes),
+            signingCredentials: _signingCredentials);
+        return Task.FromResult<string?>(_tokenHandler.WriteToken(token));
+    }
+}
+```
+
+**Client configuration (JWT written to the `Authorization` header):**
+
+```csharp
+var host = Host.CreateDefaultBuilder(args)
+    .RegisterLiteOrmRemote(opts =>
+    {
+        opts.RemoteServiceUri = new Uri("http://localhost:5000");
+
+        // Register StaticCredentialsResolver via CredentialsResolverFactory
+        opts.CredentialsResolverFactory = sp =>
+        {
+            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+            opts.ConfigureHttpClient?.Invoke(httpClient);
+            return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
+        };
+
+        // Use TransportFactory to build the transport layer, resolving ICredentialsResolver from DI
+        opts.TransportFactory = sp =>
+        {
+            var resolver = sp.GetRequiredService<ICredentialsResolver>();
+            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+            opts.ConfigureHttpClient?.Invoke(httpClient);
+            return new HttpRemoteServiceTransport(httpClient, resolver)
+            {
+                TicketHeaderName = "Authorization",  // default Cookie; switch to Authorization for JWT
+                TicketFormat = "Bearer {0}",         // produces "Bearer <token>"
+            };
+        };
+    })
+    .Build();
+
+// Log in once at startup to obtain the JWT token
+using var scope = host.Services.CreateScope();
+var resolver = scope.ServiceProvider.GetRequiredService<ICredentialsResolver>();
+await ((StaticCredentialsResolver)resolver).LoginAsync(new RemoteCredentials
+{
+    GrantType = AuthGrantType.Password,
+    Username = "admin",
+    Password = "pass",
+});
+```
+
+> The framework does not provide a sign-out endpoint. For JWT, the caller simply clears the cached client-side token; the server can control validity by shortening `ExpiresMinutes` or maintaining a token blacklist.
+
+### 5.3 Registering the Server
+
+```csharp
+// Register IRemoteAuthenticationHandler (before or after AddRemoteServer)
+// Using the built-in IdentityRemoteAuthenticationHandler<TUser>:
+builder.Services.AddSingleton<IRemoteAuthenticationHandler, IdentityRemoteAuthenticationHandler<MyUser>>();
+// Or using a JWT custom implementation:
+// builder.Services.AddSingleton<IRemoteAuthenticationHandler>(new JwtAuthHandler(signingKey));
+builder.Services.AddRemoteServer();
+```
+
+> **The framework does not register a default `IRemoteAuthenticationHandler`** — you must register one manually. If none is registered, the SignIn endpoint returns a 500 error prompting you to register a handler. The built-in `IdentityRemoteAuthenticationHandler<TUser>` is recommended, or implement the interface directly for a custom auth flow.
+
+### 5.4 Implementing `ICredentialsResolver` on the Client
+
+The client provides an identity ticket for each `InvokeAsync` via `ICredentialsResolver`:
+
+```csharp
+public interface ICredentialsResolver
+{
+    // Returns the identity ticket string; returning null means anonymous call (no ticket)
+    Task<string?> GetTicketAsync(CancellationToken cancellationToken = default);
+}
+```
+
+The framework provides `StaticCredentialsResolver` for single-user scenarios (background services, desktop clients): `LoginAsync` posts credentials to the server SignIn endpoint, the returned ticket is saved locally, and `GetTicketAsync` returns the cached ticket.
+
+#### Registering via `LiteOrmOptions`
+
+Register `StaticCredentialsResolver` via the `CredentialsResolverFactory` so the DI container manages its lifetime, and the transport layer can resolve it via the `ICredentialsResolver` interface:
+
+```csharp
+var host = Host.CreateDefaultBuilder(args)
+    .RegisterLiteOrmRemote(opts =>
+    {
+        opts.RemoteServiceUri = new Uri("http://localhost:5000");
+
+        // Register StaticCredentialsResolver via the factory
+        opts.CredentialsResolverFactory = sp =>
+        {
+            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+            opts.ConfigureHttpClient?.Invoke(httpClient);
+            return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
+        };
+    })
+    .Build();
+
+// Log in once at startup (resolve the resolver instance from the DI container)
+using (var scope = host.Services.CreateScope())
+{
+    var resolver = scope.ServiceProvider.GetRequiredService<ICredentialsResolver>();
+    await ((StaticCredentialsResolver)resolver).LoginAsync(new RemoteCredentials
+    {
+        GrantType = AuthGrantType.Password,
+        Username = "admin",
+        Password = "pass",
+    });
+}
+// In subsequent business calls, HttpRemoteServiceTransport automatically retrieves
+// the ticket via ICredentialsResolver and writes it to the request header on each InvokeAsync
+```
+
+> - When both `CredentialsResolver` and `CredentialsResolverFactory` are set, the factory takes precedence
+> - Setting neither (`null`) means anonymous connection — `HttpRemoteServiceTransport` does not write a ticket header
+> - `StaticCredentialsResolver` uses a `SemaphoreSlim` to serialize login/logout — thread-safe; `GetTicketAsync` reads the cached ticket reference and can be called concurrently
+
+### 5.5 Multi-User Scenario: Custom `ICredentialsResolver`
+
+`StaticCredentialsResolver` shares one ticket across the entire process and cannot distinguish multiple users. When a web backend needs to call the remote data service with the identity of "the end user of the current request" (BFF / gateway scenario), implement a custom `ICredentialsResolver` that reads the current user's ticket from `IHttpContextAccessor`:
+
+```mermaid
+graph LR
+    Browser["Browser (stores login ticket)"] -->|HTTP request with cookie| Web["Web Backend (BFF)"]
+    Web -->|HttpContext resolves current user| Resolver["Custom ICredentialsResolver"]
+    Web -->|Business calls| Transport["HttpRemoteServiceTransport (Singleton)"]
+    Transport -->|GetTicketAsync retrieves current user ticket| Resolver
+    Transport -->|InvokeAsync writes Cookie header| Remote["Remote Data Service"]
+```
+
+#### Configuration
+
+```csharp
+builder.Services.AddHttpContextAccessor(); // required
+
+builder.Host.RegisterLiteOrmRemote(opts =>
+{
+    opts.RemoteServiceUri = new Uri("http://localhost:5000");
+    opts.CredentialsResolverFactory = sp =>
+    {
+        var httpCtxAccessor = sp.GetRequiredService<IHttpContextAccessor>();
+        return new HttpContextTicketResolver(httpCtxAccessor);
+    };
+    // Use TransportFactory to build the transport layer with DI injection and configure the ticket header
+    opts.TransportFactory = sp =>
+    {
+        var resolver = sp.GetRequiredService<ICredentialsResolver>();
+        var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+        opts.ConfigureHttpClient?.Invoke(httpClient);
+        return new HttpRemoteServiceTransport(httpClient, resolver)
+        {
+            TicketHeaderName = "Cookie",   // forward browser cookie to the remote service
+            TicketFormat = "{0}",
+        };
+    };
+});
+
+// Custom ICredentialsResolver: reads the current user's ticket from HttpContext
+public class HttpContextTicketResolver : ICredentialsResolver
+{
+    private readonly IHttpContextAccessor _accessor;
+    public HttpContextTicketResolver(IHttpContextAccessor accessor) => _accessor = accessor;
+
+    public Task<string?> GetTicketAsync(CancellationToken cancellationToken = default)
+    {
+        var request = _accessor.HttpContext?.Request;
+        // Read the remote service ticket named "RemoteTicket" from the browser cookie
+        if (request is null || !request.Cookies.TryGetValue("RemoteTicket", out var ticket))
+            return Task.FromResult<string?>(null);
+        return Task.FromResult<string?>(ticket);
+    }
+}
+```
+
+#### Web Application Example: BFF Forwards Browser Cookie to Remote Service
+
+```csharp
+// 1. Login endpoint: BFF forwards user credentials to remote SignIn, writes returned ticket to browser cookie
+app.MapPost("/api/login", async (HttpContext ctx, LoginDto dto, IHttpClientFactory httpFactory) =>
+{
+    var client = httpFactory.CreateClient("Remote");
+    var json = JsonSerializer.Serialize(new RemoteCredentials
+    {
+        GrantType = AuthGrantType.Password,
+        Username = dto.Username,
+        Password = dto.Password,
+    });
+    var resp = await client.PostAsync("api/remote/signin",
+        new StringContent(json, Encoding.UTF8, "application/json"));
+    if (!resp.IsSuccessStatusCode)
+    {
+        ctx.Response.StatusCode = 401;
+        return;
+    }
+    var body = await resp.Content.ReadAsStringAsync();
+    using var doc = JsonDocument.Parse(body);
+    var ticket = doc.RootElement.GetProperty("Ticket").GetString();
+
+    // Write the ticket issued by the remote service to the browser cookie
+    ctx.Response.Cookies.Append("RemoteTicket", ticket!, new CookieOptions
+    {
+        HttpOnly = true,
+        MaxAge = TimeSpan.FromHours(2),
+    });
+});
+
+// 2. BFF business endpoint calls the LiteOrm remote proxy; ticket forwarded automatically
+app.MapGet("/api/me", async (HttpContext httpContext, IDemoUserService userService) =>
+{
+    // HttpContextTicketResolver reads HttpContext.Request.Cookies["RemoteTicket"]
+    // and writes it to the Invoke request header; the remote service restores the user context via Cookie middleware
+    var user = await userService.GetByUserNameAsync("alice");
+    return Results.Ok(user);
+});
+```
+
+> **Production notes**:
+> - Storing tickets directly in cookies is insecure; prefer encryption or short-lived tokens
+> - For stateless auth like JWT on the remote service, implement a custom `ICredentialsResolver` returning the JWT and set `HttpRemoteServiceTransport.TicketHeaderName = "Authorization"`, `TicketFormat = "Bearer {0}"`
+> - When the ticket expires and the remote service returns 401, the caller must re-login to refresh the ticket
+
+### 5.6 Accessing the Current User on the Server
+
+The `Invoke` endpoint automatically restores `HttpContext.User` through the ASP.NET Core authentication middleware. To access the current user in business code, use `IHttpContextAccessor`:
+
+```csharp
+public class MyService
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    public MyService(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    public Task DoSomethingAsync()
+    {
+        var user = _httpContextAccessor.HttpContext?.User;
+        var userName = user?.Identity?.Name ?? "anonymous";
+        // ...
+    }
+}
+```
+
+### 5.7 Disabling Built-in Authentication
+
+To use JWT or other custom authentication schemes, set `EnableAuthentication = false`:
+
+```csharp
+builder.Services.AddRemoteServer(options =>
+{
+    options.EnableAuthentication = false;
+});
+
+// Configure your own authentication middleware
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(...);
+```
+
+---
+
+## 6. Type Resolution and ServiceName
 
 The server finds the corresponding `Type` based on `ServiceName` in the request, and the client generates `ServiceName`. Understanding this section helps with custom service names and handling same-name type conflicts.
 
-### 5.1 `TypeResolverHelper` — Bidirectional Type Name ↔ Type Resolution
+### 6.1 `TypeResolverHelper` — Bidirectional Type Name ↔ Type Resolution
 
 `LiteOrm.Common.TypeResolverHelper` is a public utility class providing bidirectional conversion between type names and `Type`.
 
@@ -307,7 +734,7 @@ The server finds the corresponding `Type` based on `ServiceName` in the request,
 
 > **Generic type names**: Generic types should use the CLR name format `Foo`1` (with backtick arity suffix), to avoid conflicts with non-generic types of the same name.
 
-### 5.2 `IRemoteServiceTypeResolver` — Server Type Resolver
+### 6.2 `IRemoteServiceTypeResolver` — Server Type Resolver
 
 The server uses `IRemoteServiceTypeResolver` to resolve the `ServiceName` (short type name) in the request to the actual service interface type.
 
@@ -334,7 +761,7 @@ builder.Services.AddRemoteServer(options =>
 });
 ```
 
-### 5.3 ServiceName Consistency Convention
+### 6.3 ServiceName Consistency Convention
 
 - When both ends enable `AutoRegisterEntityServices`, the framework ensures consistency automatically
 - When manually registering custom names, both ends must call `TypeResolverHelper.Register`
@@ -342,11 +769,11 @@ builder.Services.AddRemoteServer(options =>
 
 ---
 
-## 6. Argument Write-back (ArgumentOut)
+## 7. Argument Write-back (ArgumentOut)
 
 > Due to the **loss of reference semantics** in remote calls (parameters are deserialized new instances on the server), modifications to parameters on the server are not automatically reflected back to the client. The `[ArgumentOut]` family of attributes is used to declare parameters that need write-back, with the framework extracting write-back values on the server and applying them on the client.
 
-### 6.1 `[IdentityOut]` — Auto-increment Primary Key Write-back
+### 7.1 `[IdentityOut]` — Auto-increment Primary Key Write-back
 
 `IEntityServiceAsync<T>`'s `InsertAsync` / `BatchInsertAsync` are already annotated with `[IdentityOut]` by default. After calling, the Id is automatically written back:
 
@@ -363,7 +790,7 @@ foreach (var o in orders)
 
 > **Dependency**: `IdentityOutAttribute` resolves the Identity column through `TableInfoProvider.Default`. Both client and server must register it (`LiteOrm` main library's `LiteOrmCoreInitializer` initializes it automatically).
 
-### 6.2 `[CopyableOut]` — Full Object Write-back
+### 7.2 `[CopyableOut]` — Full Object Write-back
 
 Applicable to parameter types that implement the `ICopyable` interface. The server returns the parameter object itself directly, and the client copies it entirely to the original object via `ICopyable.CopyFrom`.
 
@@ -389,7 +816,7 @@ public interface ICopyableUserService
 }
 ```
 
-### 6.3 `ArgumentMode` Enum
+### 7.3 `ArgumentMode` Enum
 
 | Value | Description | `ReturnType` Meaning |
 |-------|-------------|----------------------|
@@ -442,13 +869,13 @@ public interface IMyService
 
 ---
 
-## 7. Custom Transport Layer
+## 8. Custom Transport Layer
 
 Beyond the default HTTP transport, you can implement custom transports based on named pipes, gRPC, message queues, etc.
 
-### 7.1 `IRemoteServiceTransport` Interface
+### 8.1 `IRemoteServiceTransport` Interface
 
-The base interface for all transport layer implementations, defining a single method:
+The base interface for all transport layer implementations, containing only the invocation method — Connect/session management is no longer part of the transport layer:
 
 ```csharp
 public interface IRemoteServiceTransport
@@ -458,7 +885,9 @@ public interface IRemoteServiceTransport
 }
 ```
 
-### 7.2 `JsonRemoteServiceTransport` Abstract Base Class (Recommended)
+Authentication tickets are written to the request header inside `InvokeAsync` by `ICredentialsResolver`; the transport layer no longer maintains a separate Connect session.
+
+### 8.2 `JsonRemoteServiceTransport` Abstract Base Class (Recommended)
 
 In the `LiteOrm.Remote` namespace, handles request/response serialization and deserialization via `System.Text.Json`. **Custom transport layers should prefer inheriting from this class**, only needing to implement one abstract method:
 
@@ -466,10 +895,10 @@ In the `LiteOrm.Remote` namespace, handles request/response serialization and de
 public abstract class JsonRemoteServiceTransport : IRemoteServiceTransport
 {
     // Already implemented: serialize request → call GetResponseJsonAsync → deserialize response
-    public async Task<RemoteInvocationResponse> InvokeAsync(
+    public virtual async Task<RemoteInvocationResponse> InvokeAsync(
         RemoteInvocationRequest request, CancellationToken cancellationToken = default);
 
-    // Subclass only needs to implement: send JSON string to remote, return response JSON string
+    // Subclass must implement: send the JSON string to the remote, return the response JSON string
     public abstract Task<string> GetResponseJsonAsync(
         string requestJson, CancellationToken cancellationToken = default);
 }
@@ -480,6 +909,8 @@ public abstract class JsonRemoteServiceTransport : IRemoteServiceTransport
 **Inheritance example** (named pipe based):
 
 ```csharp
+using LiteOrm.Common;
+
 public class NamedPipeTransport : JsonRemoteServiceTransport
 {
     private readonly string _pipeName;
@@ -500,11 +931,25 @@ public class NamedPipeTransport : JsonRemoteServiceTransport
 opts.Transport = new NamedPipeTransport("liteorm-remote");
 ```
 
-### 7.3 Default HTTP Transport (`HttpRemoteServiceTransport`)
+### 8.3 Default HTTP Transport (`HttpRemoteServiceTransport`)
 
 Built-in subclass of `JsonRemoteServiceTransport`, based on `HttpClient`. Configure via `RemoteServiceUri` + `ConfigureHttpClient` (see [Section 4.2](#42-client-configuration-liteormoptions)).
 
-### 7.4 Fully Custom Transport
+The constructor accepts an `ICredentialsResolver?`; in `GetResponseJsonAsync` it obtains the ticket via `GetTicketAsync` and writes it to the HTTP request header using `TicketHeaderName` (default `Cookie`) and `TicketFormat` (default `{0}`):
+
+```csharp
+public sealed class HttpRemoteServiceTransport : JsonRemoteServiceTransport
+{
+    public string TicketHeaderName { get; set; } = "Cookie";   // ticket request header name
+    public string TicketFormat { get; set; } = "{0}";          // ticket format template (e.g. "Bearer {0}")
+
+    public HttpRemoteServiceTransport(HttpClient httpClient,
+        ICredentialsResolver? credentialsResolver = null,
+        string requestUri = "api/remote/invoke");
+}
+```
+
+### 8.4 Fully Custom Transport
 
 Implement `IRemoteServiceTransport` directly (without inheriting `JsonRemoteServiceTransport`), handling serialization yourself:
 
@@ -515,6 +960,7 @@ public class MyTransport : IRemoteServiceTransport
         RemoteInvocationRequest request, CancellationToken cancellationToken)
     {
         // Must handle request serialization, transport, and response deserialization on your own
+        // Tickets can be obtained at call time via an ICredentialsResolver injected through the constructor
     }
 }
 
@@ -523,7 +969,7 @@ opts.Transport = new MyTransport();
 
 ---
 
-## 8. Serialization Constraints
+## 9. Serialization Constraints
 
 Remote service invocation **completely relies on JSON serialization of input parameters and return values**. Understanding the following constraints helps avoid common pitfalls.
 
@@ -539,7 +985,7 @@ For the JSON structure of requests and responses, see [Expression Serialization]
 
 ---
 
-## 9. Notes
+## 10. Notes
 
 1. **`ForEachAsync` is not supported for remote calls**: Streaming iteration requires continuous data return, which the remote protocol does not support; throws `NotSupportedException`
 2. **`CancellationToken` transparent passing**: The cancellation token is not serialized; it is passed end-to-end by the transport layer
@@ -562,7 +1008,7 @@ For the JSON structure of requests and responses, see [Expression Serialization]
 
 ---
 
-## 10. Features and Advantages
+## 11. Features and Advantages
 
 | Feature | Description |
 |---------|-------------|
