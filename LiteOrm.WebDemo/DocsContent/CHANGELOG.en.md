@@ -1,12 +1,12 @@
 # Changelog
 
-## v8.0.20 (Unreleased)
+## v8.0.20 (2026-07-28)
 
 ### Added
 - Added `RawSql` marker type to `ExprString` for inlining non-parameterizable dynamic values (`6f401b6`)
 - Added CTE recursive keyword support (`81fade6`)
 - Added table-level `SyncTable` config to override sync strategy per entity (`038e93b`)
-- Added `ShortId` utility for 8-char Base62 random strings (`18d70be`)
+- Added `ShortId` utility for 8-char Base36 random strings (digits + lowercase letters) (`18d70be`)
 - Added `Id` property to `DAOContext`; `ContextId` included in logs/exceptions (`18d70be`)
 - Added Remote/Server authentication mechanism: SignIn endpoint + ticket-based; the client provides tickets via `ICredentialsResolver`, the server issues tickets via `IRemoteAuthenticationHandler`, supporting Cookie/JWT and other auth schemes
 
