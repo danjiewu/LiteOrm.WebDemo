@@ -13,7 +13,8 @@ public interface IDemoUserService :
     Task<DemoUserView?> GetProfileAsync(int userId, CancellationToken cancellationToken = default);
 }
 
-public class DemoUserService : EntityService<DemoUser, DemoUserView>, IDemoUserService
+[AutoRegister(Lifetime = Lifetime.Scoped)]
+public class DemoUserService(ObjectDAO<DemoUser> dao, ObjectViewDAO<DemoUserView> viewDao) : EntityService<DemoUser, DemoUserView>(dao, viewDao), IDemoUserService
 {
     public async Task<DemoUserView?> GetByUserNameAsync(string userName, CancellationToken cancellationToken = default) =>
         await SearchOneAsync(Expr.Prop(nameof(DemoUser.UserName)) == userName, cancellationToken: cancellationToken);

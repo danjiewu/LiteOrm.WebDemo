@@ -328,6 +328,6 @@ app.Run();
 ## 相关链接
 
 - [返回目录](../README.md)
-- [第一个完整示例](../01-getting-started/04-first-example.md)
+- [第一个完整示例（DI 版）](../01-getting-started/05-first-example-di.md)
 - [视图模型与服务层](../02-core-usage/02-view-models-and-services.md)
-- [权限过滤](../03-advanced-topics/06-permission-filtering.md)
+- [权限过滤](./02-permission-filtering.md)

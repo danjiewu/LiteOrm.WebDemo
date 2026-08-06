@@ -11,6 +11,7 @@ public interface IDemoDepartmentService :
 {
 }
 
-public class DemoDepartmentService : EntityService<DemoDepartment>, IDemoDepartmentService
+[AutoRegister(Lifetime = Lifetime.Scoped)]
+public class DemoDepartmentService(ObjectDAO<DemoDepartment> dao, ObjectViewDAO<DemoDepartment> viewDao) : EntityService<DemoDepartment>(dao, viewDao), IDemoDepartmentService
 {
 }

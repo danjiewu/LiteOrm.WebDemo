@@ -87,7 +87,7 @@ internal sealed class RuntimeTypeFactory
 
     private static Type NormalizePropertyType(Type type)
     {
-        return type == typeof(void) ? typeof(object) : type;
+        return type == typeof(void) ? typeof(string) : type;
     }
 
     private static void ApplyAttribute(dynamic target, ConstructorInfo constructor, object[] arguments)

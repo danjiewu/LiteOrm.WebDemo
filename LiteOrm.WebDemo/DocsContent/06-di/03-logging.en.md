@@ -1,4 +1,4 @@
-# Logging and Diagnostics
+﻿# Logging and Diagnostics
 
 LiteOrm writes runtime logs through `Microsoft.Extensions.Logging`. If the host application already has logging providers configured, such as Console, Debug, or Serilog, LiteOrm service-call logs, exception logs, and slow-query logs flow through the same pipeline.
 
@@ -280,6 +280,6 @@ ServiceInvokeInterceptor.MaxExpandedLogLength = 20;
 ## Related Links
 
 - [Back to docs hub](../README.md)
-- [Configuration and Registration](../01-getting-started/03-configuration-and-registration.en.md)
+- [Configuration Reference](../05-reference/01-configuration-reference.en.md)
 - [Transactions](./01-transactions.en.md)
-- [Performance](./03-performance.en.md)
+- [Performance](../03-advanced-topics/03-performance.en.md)

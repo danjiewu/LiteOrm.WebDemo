@@ -16,16 +16,11 @@ public interface IDemoOrderService :
     Task<OrderExprQueryResponse> QueryByExprAsync(Expr? expr, CancellationToken cancellationToken = default);
 }
 
-public class DemoOrderService : EntityService<DemoOrder, DemoOrderView>, IDemoOrderService
+[AutoRegister(Lifetime = Lifetime.Scoped)]
+public class DemoOrderService(ObjectDAO<DemoOrder> dao, ObjectViewDAO<DemoOrderView> viewDao, IMemoryCache _memoryCache) : EntityService<DemoOrder, DemoOrderView>(dao, viewDao), IDemoOrderService
 {
     private static readonly TimeSpan CountCacheDuration = TimeSpan.FromSeconds(30);
     private static long _countCacheVersion = 1;
-    private readonly IMemoryCache _memoryCache;
-
-    public DemoOrderService(IMemoryCache memoryCache)
-    {
-        _memoryCache = memoryCache;
-    }
 
     public async Task<OrderExprQueryResponse> QueryByExprAsync(Expr? expr, CancellationToken cancellationToken = default)
     {

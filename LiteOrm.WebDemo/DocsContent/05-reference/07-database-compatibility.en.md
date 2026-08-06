@@ -168,7 +168,7 @@ The `[Column]` attribute's `IdentityStart` (start value, default `1`) and `Ident
 
 ## 3. Bulk Write Capabilities (IBulkProvider)
 
-LiteOrm supports high-performance bulk writes via the `IBulkProvider` interface, but **the core library does not include any built-in implementations**—only the interface and factory are provided.
+LiteOrm supports high-performance bulk writes via the `IBulkProvider` interface, but **the base library does not include any built-in implementations**—only the interface is provided.
 
 | Database | Common Approach | Built-in Implementation |
 |----------|----------------|------------------------|
@@ -178,9 +178,13 @@ LiteOrm supports high-performance bulk writes via the `IBulkProvider` interface,
 | PostgreSQL | `COPY` command | None |
 | SQLite | Batch `INSERT` | None |
 
-`BulkProviderFactory` resolves `IBulkProvider` instances registered with `[AutoRegister(Key = typeof(ConnectionType))]` by connection type. Returns `null` when no provider is registered, causing `BatchInsertAsync` to fall back to row-by-row inserts.
+**How to enable**: implement `IBulkProvider` and assign it directly to the `BulkProvider` property of the matching `SqlBuilder`. When no provider is set, `SqlBuilder.BulkProvider` is `null`, and `BatchInsert`/`BatchInsertAsync` fall back to multi-value INSERT or row-by-row inserts.
 
-> To enable high-performance bulk writes, implement `IBulkProvider` and register it with `[AutoRegister(Key = typeof(MySqlConnection))]`.
+```csharp
+SqlBuilderFactory.Instance.GetSqlBuilder(typeof(MySqlConnection)).BulkProvider = new MySqlBulkCopyProvider();
+```
+
+> To enable high-performance bulk writes, implement `IBulkProvider` and assign it to `SqlBuilder.BulkProvider`.
 
 ## 4. Parameter Limits
 
@@ -211,7 +215,7 @@ Recommended references:
 | SQL Server | ✅ | ❌ | ❌ | ❌ |
 | Dameng / OceanBase / TiDB / GreatDB | ✅ | ❌ | ❌ | ❌ |
 
-> The test, demo, and benchmark projects only configure MySQL, SQLite, and Oracle. Other database `SqlBuilder` implementations exist in the core library but are not covered by automated tests. When adopting these databases, prioritize validating paging and bulk operations.
+> The test, demo, and benchmark projects only configure MySQL, SQLite, and Oracle. Other database `SqlBuilder` implementations exist in the base library but are not covered by automated tests. When adopting these databases, prioritize validating paging and bulk operations.
 
 ## 6. How Docs Map to Compatibility Work
 
@@ -273,7 +277,7 @@ That keeps business-layer code more stable over time.
 ## Related Links
 
 - [Back to English docs hub](../README.md)
-- [Example Index](./06-example-index.en.md)
-- [Generated SQL Examples](./07-sql-examples.en.md)
+- [Example Index](./05-example-index.en.md)
+- [Generated SQL Examples](./06-sql-examples.en.md)
 - [Custom paging](../03-advanced-topics/05-custom-paging.en.md)
 - [Custom SqlBuilder and dialect extension](../04-extensibility/03-custom-sqlbuilder.en.md)

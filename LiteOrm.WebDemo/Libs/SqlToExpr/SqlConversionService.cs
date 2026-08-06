@@ -52,15 +52,15 @@ public sealed class SqlConversionService
                 return result;
             }
 
-            using var providerScope = new RuntimeTableInfoProviderScope(options.Dialect.GetSqlBuilder());
             var compiled = CompileAndBuildExpr(result.HelperCode, result.ViewCode, result.ExprCode, options.Namespace);
             var expr = compiled.Expr;
             var viewType = compiled.Assembly.GetType($"{options.Namespace}.{viewName}", throwOnError: true)!;
             var sqlGen = new SqlGen(viewType);
+            sqlGen.SqlBuilder = options.Dialect.GetSqlBuilder();
             if (expr is not SelectExpr) expr = new SelectExpr()
             {
                 Source = expr.ToSource(viewType),
-                Selects = TableInfoProvider.Default.GetTableView(viewType).SelectColumns.Select((col, i) => new SelectItemExpr(Expr.Prop(col.PropertyName), col.PropertyName)).ToList()
+                Selects = TableInfoProvider.Instance.GetTableView(viewType).SelectColumns.Select((col, i) => new SelectItemExpr(Expr.Prop(col.PropertyName), col.PropertyName)).ToList()
             };
             result.RegeneratedSql = sqlGen.ToSql(expr).Sql;
         }
@@ -161,8 +161,8 @@ public sealed class SqlConversionService
 
             foreach (var condition in join.Conditions)
             {
-                AddColumn(aliasMap, mainTable, condition.Left, typeof(object));
-                AddColumn(aliasMap, mainTable, condition.Right, typeof(object));
+                AddColumn(aliasMap, mainTable, condition.Left, typeof(string));
+                AddColumn(aliasMap, mainTable, condition.Right, typeof(string));
 
                 if (!string.IsNullOrWhiteSpace(condition.Left.Alias) &&
                     !string.IsNullOrWhiteSpace(condition.Right.Alias) &&
@@ -185,7 +185,7 @@ public sealed class SqlConversionService
             switch (projection.Kind)
             {
                 case ProjectionKind.Column when projection.Column != null:
-                    AddColumn(aliasMap, mainTable, projection.Column, typeof(object));
+                    AddColumn(aliasMap, mainTable, projection.Column, typeof(string));
                     break;
                 case ProjectionKind.Function when projection.Function != null:
                     AddFunctionArgumentColumns(aliasMap, mainTable, projection.Function);
@@ -197,10 +197,10 @@ public sealed class SqlConversionService
             InferFilterColumns(aliasMap, mainTable, query.Where);
 
         foreach (var group in query.GroupBy)
-            AddColumn(aliasMap, mainTable, group, typeof(object));
+            AddColumn(aliasMap, mainTable, group, typeof(string));
 
         foreach (var orderBy in query.OrderBy)
-            AddColumn(aliasMap, mainTable, orderBy.Column, typeof(object));
+            AddColumn(aliasMap, mainTable, orderBy.Column, typeof(string));
 
         MarkSelectColumns(aliasMap, mainTable, query);
 
@@ -288,7 +288,7 @@ public sealed class SqlConversionService
         AddColumn(aliasMap, mainTable, comparison.Left, InferLiteralType(comparison.RightLiteral));
 
         if (comparison.RightColumn != null)
-            AddColumn(aliasMap, mainTable, comparison.RightColumn, typeof(object));
+            AddColumn(aliasMap, mainTable, comparison.RightColumn, typeof(string));
     }
 
     private static TableSchema EnsureTable(DatabaseSchema schema, string tableName)
@@ -317,7 +317,7 @@ public sealed class SqlConversionService
         {
             Name = reference.ColumnName,
             PropertyName = CodeGenNaming.ToPropertyName(reference.ColumnName),
-            ClrType = suggestedType == typeof(DBNull) ? typeof(object) : suggestedType,
+            ClrType = suggestedType == typeof(DBNull) ? typeof(string) : suggestedType,
             IsNullable = true,
             Ordinal = table.Columns.Count
         });
@@ -431,7 +431,7 @@ public sealed class SqlConversionService
         switch (expression)
         {
             case ParsedColumnExpression column:
-                AddColumn(aliasMap, mainTable, column.Column, typeof(object));
+                AddColumn(aliasMap, mainTable, column.Column, typeof(string));
                 break;
             case ParsedFunctionExpression function:
                 AddFunctionArgumentColumns(aliasMap, mainTable, function.Function);
@@ -451,7 +451,7 @@ public sealed class SqlConversionService
         var comparison = (FilterComparisonNode)node;
         AddColumn(aliasMap, mainTable, comparison.Left, InferLiteralType(comparison.RightLiteral));
         if (comparison.RightColumn != null)
-            AddColumn(aliasMap, mainTable, comparison.RightColumn, typeof(object));
+            AddColumn(aliasMap, mainTable, comparison.RightColumn, typeof(string));
     }
 
     private static Type InferFunctionArgumentType(string functionName, int argumentIndex)
@@ -462,13 +462,26 @@ public sealed class SqlConversionService
             "AVG" or "SUM" => typeof(decimal),
             "LOWER" or "UPPER" or "SUBSTRING" or "TRIM" or "TRIMSTART" or "TRIMEND" or "CONCAT" or "COALESCE" or "IFNULL" or "NVL" => typeof(string),
             "NOW" or "TODAY" or "CURRENT_DATE" or "CURRENT_TIMESTAMP" => typeof(DateTime),
-            _ => typeof(object)
+            _ => typeof(string)
         };
     }
 
     private static Type InferLiteralType(object? value)
     {
-        return value?.GetType() ?? typeof(object);
+        if (value == null)
+            return typeof(string);
+
+        var type = value.GetType();
+
+        // 整型数值优先使用 int 类型
+        if (type == typeof(long))
+            return typeof(int);
+        if (type == typeof(short))
+            return typeof(int);
+        if (type == typeof(byte))
+            return typeof(int);
+
+        return type;
     }
 
     private static BoundSelectModel Bind(DatabaseSchema schema, ParsedSelectQuery query, List<CodeGenDiagnostic> diagnostics)
@@ -1311,12 +1324,12 @@ public sealed class SqlConversionService
             "COUNT" => typeof(int),
             "AVG" => typeof(double),
             "SUM" => InferValueExpressionType(function.Arguments.FirstOrDefault()) ?? typeof(decimal),
-            "MAX" or "MIN" => InferValueExpressionType(function.Arguments.FirstOrDefault()) ?? typeof(object),
+            "MAX" or "MIN" => InferValueExpressionType(function.Arguments.FirstOrDefault()) ?? typeof(string),
             "NOW" or "TODAY" or "CURRENT_DATE" or "CURRENT_TIMESTAMP" => typeof(DateTime),
             "CONCAT" or "LOWER" or "UPPER" or "SUBSTRING" or "TRIM" or "TRIMSTART" or "TRIMEND" or "FORMAT" => typeof(string),
-            "COALESCE" or "IFNULL" or "NVL" => InferValueExpressionType(function.Arguments.FirstOrDefault()) ?? InferValueExpressionType(function.Arguments.Skip(1).FirstOrDefault()) ?? typeof(object),
+            "COALESCE" or "IFNULL" or "NVL" => InferValueExpressionType(function.Arguments.FirstOrDefault()) ?? InferValueExpressionType(function.Arguments.Skip(1).FirstOrDefault()) ?? typeof(string),
             "CAST" when function.Arguments.Count > 1 && TryMapSqlTypeArgument(function.Arguments[1], out _, out var castType) => castType,
-            _ => typeof(object)
+            _ => typeof(string)
         };
     }
 
@@ -1329,7 +1342,7 @@ public sealed class SqlConversionService
                 return branchType;
         }
 
-        return InferValueExpressionType(function.ElseArgument) ?? typeof(object);
+        return InferValueExpressionType(function.ElseArgument) ?? typeof(string);
     }
 
     private static Type? InferValueExpressionType(BoundValueExpression? expression)
@@ -1338,10 +1351,26 @@ public sealed class SqlConversionService
         {
             null => null,
             BoundColumnValueExpression column => column.Column.Column.ClrType,
-            BoundLiteralValueExpression literal => literal.Value?.GetType(),
+            BoundLiteralValueExpression literal => NormalizeIntegerType(literal.Value?.GetType()),
             BoundFunctionValueExpression function => InferFunctionResultType(function.Function),
             _ => null
         };
+    }
+
+    private static Type? NormalizeIntegerType(Type? type)
+    {
+        if (type == null)
+            return null;
+
+        // 整型数值优先使用 int 类型
+        if (type == typeof(long))
+            return typeof(int);
+        if (type == typeof(short))
+            return typeof(int);
+        if (type == typeof(byte))
+            return typeof(int);
+
+        return type;
     }
 
     private static bool TryMapSqlTypeArgument(BoundValueExpression expression, out string dbTypeCode)
@@ -1360,7 +1389,7 @@ public sealed class SqlConversionService
             return true;
 
         dbTypeCode = string.Empty;
-        clrType = typeof(object);
+        clrType = typeof(string);
         return false;
     }
 
@@ -1443,7 +1472,7 @@ public sealed class SqlConversionService
         }
 
         dbTypeCode = string.Empty;
-        clrType = typeof(object);
+        clrType = typeof(string);
         return false;
     }
 

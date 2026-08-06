@@ -15,9 +15,10 @@ public sealed class DocsService
     {
         ["01-getting-started"] = ("入门", "Getting Started", "环境准备与第一个 LiteOrm 示例"),
         ["02-core-usage"] = ("核心使用", "Core Usage", "实体映射、视图模型、Expr 与查询基础"),
-        ["03-advanced-topics"] = ("高级特性", "Advanced Topics", "事务、分表、性能、窗口函数、权限与日志"),
-        ["04-extensibility"] = ("扩展开发", "Extensibility", "自定义表达式、函数验证、SqlBuilder 与动态 Controller"),
-        ["05-reference"] = ("参考文档", "Reference", "API 索引、术语表、SQL 示例与兼容性"),
+        ["03-advanced-topics"] = ("高级特性", "Advanced Topics", "分表分库、性能、窗口函数、自定义分页、安全与远程服务"),
+        ["04-extensibility"] = ("扩展开发", "Extensibility", "自定义表达式、函数验证、SqlBuilder 方言扩展与前端 Expr 接入"),
+        ["05-reference"] = ("参考文档", "Reference", "配置参考、API 索引、术语表、SQL 示例与数据库兼容性"),
+        ["06-di"] = ("DI扩展", "DI Extension", "Autofac 集成、事务、权限过滤、日志诊断与动态 Controller"),
     };
 
     public DocsService(string docsPath)

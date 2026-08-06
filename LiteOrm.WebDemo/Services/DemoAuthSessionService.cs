@@ -11,6 +11,7 @@ public interface IDemoAuthSessionService :
 {
 }
 
-public class DemoAuthSessionService : EntityService<DemoAuthSession>, IDemoAuthSessionService
+[AutoRegister(Lifetime = Lifetime.Scoped)]
+public class DemoAuthSessionService(ObjectDAO<DemoAuthSession> dao, ObjectViewDAO<DemoAuthSession> viewDao) : EntityService<DemoAuthSession>(dao, viewDao), IDemoAuthSessionService
 {
 }

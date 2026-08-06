@@ -1,6 +1,5 @@
-using LiteOrm;
 using LiteOrm.Remote.Server;
-using LiteOrm.Service;
+using LiteOrm.DependencyInjection;
 using LiteOrm.SqlToExpr;
 using LiteOrm.WebDemo.Data;
 using LiteOrm.WebDemo.Endpoints;
