@@ -1,5 +1,25 @@
 # 变更日志 (Changelog)
 
+## v8.1.1 (2026-08-07)
+
+### Breaking Changes
+- `[AutoRegister]` 的 `ServiceTypes`（此前为 `Type[]`）已改为枚举 `AutoRegisterServiceTypes`：`All`（默认，实现类型自身 + 接口）、`Self`（仅自身）、`Interface`（仅接口）。原 `[AutoRegister(Lifetime.Scoped, typeof(IFoo))]` 写法请改为 `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`。
+- `DAOBase` 及派生 DAO（`ObjectDAO<T>`、`ObjectViewDAO<T>`、`DataDAO<T>`、`DataViewDAO<T>`）构造函数需传入 `SessionManager`，不再依赖静态 `SessionManager.Current`。手动构造 DAO 时请传入 `sessionManager`；依赖注入场景由容器自动解析。`SessionManager.Current` 仅保留为外部使用入口，`AddLiteOrm()` 会自动将其绑定到当前作用域实例。
+
+### 新增功能
+
+- `RegisterLiteOrm()` 的 `LiteOrmOptions` 新增 `AutoRegisterServices` 选项（默认 `true`），设为 `false` 可跳过自动扫描注册 (`009d2c3`)
+- `EntityService<T>`、`EntityViewService<T>`、`ObjectDAO<T>`、`ObjectViewDAO<T>`、`DataDAO<T>`、`DataViewDAO<T>` 基类新增 `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`，派生类自动继承注册行为。
+
+### 改进
+
+- 非 AOT 模式自动注册改用运行时程序集扫描（`LiteOrmAutoRegistration.Apply()`），不再生成源代码；AOT 模式仍由源生成器编译期生成，二者按 `RuntimeFeature.IsDynamicCodeSupported` 自动分流 (`009d2c3`)
+- `AutoRegisterGenerator` 的 AOT 判定与 `TableInfoGenerator` 统一，读取 `build_property.enableaotanalyzer` / `enabletrimanalyzer` 等分析器属性 (`009d2c3`)
+- Autofac 自动注册（`RegisterLiteOrm()`）中，实现类型或其接口带 `[Service]` 特性（`IsService = true`）时会自动应用 `ServiceInvokeInterceptor` 拦截，无需显式声明 `[Intercept]`。
+- `RegisterLiteOrm()` 移除 `LiteOrmOptions.RegisterScope` 选项，作用域跟踪始终默认自动启用（`ScopeExtensions.RegisterScope` 仍保留为内部调用）。
+
+---
+
 ## v8.1.0 (2026-08-02)
 
 ### Breaking Changes
@@ -21,7 +41,7 @@
 - 宿主集成 / Remote 使用单例 `ProxyGenerator` 优化性能 (`8f8753d`)
 - `AttributeTableInfoProvider` 不再依赖 `SqlBuilderFactory`、`DataSourceProvider` (`b50b49a`)
 - 优化建表加锁机制，避免发生死锁 (`148f2ac`)
-- DAO、Service 增加 AOT 相关特性标注 (`36641fa`, `05e9305`, `1737234`, `e68ded4`)
+- DAO、Service 增加 AOT 相关特性标注 (`36641fa`, `0599305`, `1737234`, `e68ded4`)
 - `ColumnDefinition.DbType` 可为空，运行时自动判定 DbType 类型 (`09bd95d`)
 
 ---

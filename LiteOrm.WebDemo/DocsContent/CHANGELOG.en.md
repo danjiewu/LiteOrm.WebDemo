@@ -1,5 +1,25 @@
 # Changelog
 
+## v8.1.1 (2026-08-07)
+
+### Breaking Changes
+- `[AutoRegister]`'s `ServiceTypes` (previously `Type[]`) is now an enum `AutoRegisterServiceTypes`: `All` (default, implementation type itself + interfaces), `Self` (itself only), `Interface` (interfaces only). Replace the old `[AutoRegister(Lifetime.Scoped, typeof(IFoo))]` syntax with `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`.
+- The `DAOBase` and derived DAO constructors (`ObjectDAO<T>`, `ObjectViewDAO<T>`, `DataDAO<T>`, `DataViewDAO<T>`) now require a `SessionManager` parameter and no longer depend on the static `SessionManager.Current`. When constructing DAOs manually, pass the `SessionManager`; under DI the container resolves it automatically. `SessionManager.Current` is kept solely as an external entry point, and `AddLiteOrm()` binds it to the current scope instance automatically.
+
+### Added
+
+- Added `AutoRegisterServices` option to `RegisterLiteOrm()`'s `LiteOrmOptions` (default `true`); set to `false` to skip automatic scan registration (`009d2c3`)
+- `EntityService<T>`, `EntityViewService<T>`, `ObjectDAO<T>`, `ObjectViewDAO<T>`, `DataDAO<T>`, `DataViewDAO<T>` base classes now carry `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`, so derived classes inherit the registration behavior automatically.
+
+### Changed
+
+- Non-AOT builds now auto-register via runtime assembly scan (`LiteOrmAutoRegistration.Apply()`) instead of emitting source code; AOT builds still use the compile-time source generator, dispatched automatically by `RuntimeFeature.IsDynamicCodeSupported` (`009d2c3`)
+- `AutoRegisterGenerator` AOT detection aligned with `TableInfoGenerator`, reading `build_property.enableaotanalyzer` / `enabletrimanalyzer` analyzer properties (`009d2c3`)
+- In Autofac auto-registration (`RegisterLiteOrm()`), a type (or its interface) carrying `[Service]` (`IsService = true`) is automatically intercepted with `ServiceInvokeInterceptor` — no explicit `[Intercept]` needed.
+- Removed the `LiteOrmOptions.RegisterScope` option from `RegisterLiteOrm()`; scope tracking is now always enabled automatically (`ScopeExtensions.RegisterScope` is called internally).
+
+---
+
 ## v8.1.0 (2026-08-02)
 
 ### Breaking Changes
@@ -20,7 +40,7 @@ This release introduces several breaking changes. See the [8.1 Upgrade Guide](./
 - Host integration / Remote use a singleton `ProxyGenerator` for better performance (`8f8753d`)
 - `AttributeTableInfoProvider` no longer depends on `SqlBuilderFactory`, `DataSourceProvider` (`b50b49a`)
 - Optimized table creation locking to avoid deadlocks (`148f2ac`)
-- DAO and Service now carry AOT-related attribute annotations (`36641fa`, `05e9305`, `1737234`, `e68ded4`)
+- DAO and Service now carry AOT-related attribute annotations (`36641fa`, `0599305`, `1737234`, `e68ded4`)
 - `ColumnDefinition.DbType` is now nullable; DbType is inferred automatically at runtime (`09bd95d`)
 
 ---

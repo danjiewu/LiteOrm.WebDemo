@@ -50,23 +50,31 @@ MySqlBuilder.Instance.BulkProvider = new MySqlBulkCopyProvider();
 
 `SqlBuilder.BulkProvider` 未设置时返回 `null`，`BatchInsert`/`BatchInsertAsync` 自动回退到多值 INSERT 或逐条插入。
 
-### 第 3 步：`DataSourceProvider` 改为显式配置（仅直接使用基础库时）
+---
 
-`DataSourceProvider` 不再通过 `[AutoRegister]` 注册，也不再从构造函数读取 `IConfiguration`。直接使用基础库（不使用 DI 包）时，需通过 `AddDataSource` 显式添加，或通过 `LoadConfiguration` 从 `IConfiguration` 加载：
+## v8.1.1 破坏性变更：DAO 构造函数注入
+
+> 本节适用于从 **v8.1.0 及更低版本** 升级到 **v8.1.1** 的用户（旧版 DAO 构造函数均无参数）。
+
+v8.1.1 起，`DAOBase` 及各 DAO 基类（`ObjectDAO<T>`、`ObjectViewDAO<T>`、`DataDAO<T>`、`DataViewDAO<T>`）构造函数改为接收 `SessionManager` 参数，DAO 内部不再依赖静态 `SessionManager.Current`；`Current` 仅保留为外部调用入口。
+
+- **依赖注入场景**（`RegisterLiteOrm()` / `AddLiteOrm()`）：无需任何改动，DI 容器自动解析 `SessionManager`。
+- **手动构造场景**：需将 `sessionManager` 传入 DAO 构造函数：
 
 ```csharp
-var provider = new DataSourceProvider();
-provider.AddDataSource(new DataSourceConfig
-{
-    Name = "DefaultConnection",
-    ConnectionString = "Data Source=myapp.db",
-    Provider = typeof(Microsoft.Data.Sqlite.SqliteConnection).AssemblyQualifiedName,
-    SyncTable = true
-});
-provider.SetDefaultDataSource("DefaultConnection");
+// 旧（v8.1.0 及更低）
+var objectDAO = new ObjectDAO<User>();
+var objectViewDAO = new ObjectViewDAO<User>();
+var userService = new EntityService<User>(objectDAO, objectViewDAO);
+
+// 新（v8.1.1）
+var objectDAO = new ObjectDAO<User>(sessionManager);
+var objectViewDAO = new ObjectViewDAO<User>(sessionManager);
+var userService = new EntityService<User>(objectDAO, objectViewDAO);
 ```
 
-使用 `RegisterLiteOrm()`（DI 场景）时无需改动，`DataSourceProviderExtensions.LoadConfiguration` 会自动从宿主 `IConfiguration` 的 `LiteOrm` 节点加载。
+- 自定义 DAO 若继承自 DAO 基类，构造函数需改为 `public MyDAO(SessionManager sessionManager) : base(sessionManager) { }`。
+- `AddLiteOrm()` 在注册 `SessionManager` 时自动绑定 `SessionManager.Current`；`RegisterLiteOrm()` 的作用域跟踪默认启用，二者均无需配置。
 
 ---
 
@@ -88,10 +96,14 @@ builder.Services.AddLiteOrm(options =>
 
 `AddLiteOrm()` 注册核心服务、泛型 DAO / Service（`IEntityService<T>`、`IEntityViewService<T>`、`IObjectDAO<T>` 等），并应用 `[AutoRegister]` 服务的编译期注册。
 
+8.1.1 起，`AddLiteOrm()` 在注册 `SessionManager` 时自动绑定 `SessionManager.Current`（每个作用域内解析到该作用域实例），无需手写中间件或手动调用 `SessionManager.SetCurrent(...)`。
+
 ### `[AutoRegister]` 机制增强
 
 - `[AutoRegister]` 特性可标注在基类上，派生类自动继承注册行为。
 - `LiteOrm.Generators` 源生成器在编译期扫描 `[AutoRegister]` 类型并生成注册代码（等价于运行时反射扫描，但无需 `Assembly.GetTypes()`，支持 NativeAOT 裁剪）。`RegisterLiteOrm()` 与 `AddLiteOrm()` 均自动应用。
+- 注册范围由 `[AutoRegister]` 的 `ServiceTypes` 枚举 `AutoRegisterServiceTypes` 控制：`All`（默认，注册实现类型自身与接口）、`Self`（仅自身）、`Interface`（仅接口）。原 `ServiceTypes` 的 `Type[]` 写法已移除。
+- Service 与 DAO 基类（`EntityService<T>`、`ObjectDAO<T>` 等）已标注 `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`，派生类自动继承；需指定接口注入时用 `AutoRegisterServiceTypes.Interface`，仅自身时用 `Self`。
 
 ### AOT / NativeAOT 支持
 
@@ -117,7 +129,7 @@ netstandard2.0 / 2.1 目标的依赖包版本降至最低，减少与宿主应�
 
 ### Q2: 我的业务 Service 未显式指定 `ServiceTypes`，还能通过接口解析吗？
 
-可以。未显式指定 `ServiceTypes` 时，会自动推断实现类型的非系统命名空间接口作为服务类型。依赖接口注入的用户自定义服务无需显式声明 `ServiceTypes`。
+可以。`[AutoRegister]` 的 `ServiceTypes` 默认值为 `AutoRegisterServiceTypes.All`，会自动注册实现类型自身及其非 System 命名空间接口，因此依赖接口注入的用户自定义服务无需显式声明 `ServiceTypes`。若只想注册接口，可写 `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`。
 
 ### Q3: 原来用 MS DI 的 `IServiceCollection` 注册的服务还能用吗？
 
@@ -127,15 +139,9 @@ netstandard2.0 / 2.1 目标的依赖包版本降至最低，减少与宿主应�
 
 不需要。`RegisterLiteOrm()` 会自动从宿主 `IConfiguration` 的 `LiteOrm` 节点加载数据源配置，原有配置写法保持不变。
 
----
+### Q5: 为什么 `SessionManager.Current` 为空？
 
-## 验证
+使用 `RegisterLiteOrm()` 或 `AddLiteOrm` 时会启用作用域跟踪，无需配置；手动管理场景中需调用 `SessionManager.SetCurrent(...)` 来设置当前会话。
 
-升级后请确保：
 
-```bash
-dotnet build .\LiteOrm.sln
-dotnet test .\LiteOrm.sln
-```
 
-完整测试套件全部通过是本版本验证基线。

@@ -50,23 +50,31 @@ MySqlBuilder.Instance.BulkProvider = new MySqlBulkCopyProvider();
 
 When `SqlBuilder.BulkProvider` is unset it returns `null`, and `BatchInsert`/`BatchInsertAsync` automatically fall back to multi-value INSERT or row-by-row inserts.
 
-### Step 3: `DataSourceProvider` Is Now Explicitly Configured (Base-only Usage)
+---
 
-`DataSourceProvider` is no longer registered via `[AutoRegister]` and no longer reads `IConfiguration` from its constructor. When using the base library directly (without the DI package), configure data sources explicitly via `AddDataSource` or load them via `LoadConfiguration`:
+## v8.1.1 Breaking Change: DAO Constructor Injection
+
+> This section applies when upgrading from **v8.1.0 or earlier** to **v8.1.1** (older DAO constructors had no parameters).
+
+As of v8.1.1, `DAOBase` and the DAO base classes (`ObjectDAO<T>`, `ObjectViewDAO<T>`, `DataDAO<T>`, `DataViewDAO<T>`) take a `SessionManager` constructor parameter; DAOs no longer depend on the static `SessionManager.Current`, which is kept solely as an external entry point.
+
+- **DI scenarios** (`RegisterLiteOrm()` / `AddLiteOrm()`): no change needed — the container resolves `SessionManager` automatically.
+- **Manual construction**: pass the `sessionManager` to the DAO constructors:
 
 ```csharp
-var provider = new DataSourceProvider();
-provider.AddDataSource(new DataSourceConfig
-{
-    Name = "DefaultConnection",
-    ConnectionString = "Data Source=myapp.db",
-    Provider = typeof(Microsoft.Data.Sqlite.SqliteConnection).AssemblyQualifiedName,
-    SyncTable = true
-});
-provider.SetDefaultDataSource("DefaultConnection");
+// Old (v8.1.0 and lower)
+var objectDAO = new ObjectDAO<User>();
+var objectViewDAO = new ObjectViewDAO<User>();
+var userService = new EntityService<User>(objectDAO, objectViewDAO);
+
+// New (v8.1.1)
+var objectDAO = new ObjectDAO<User>(sessionManager);
+var objectViewDAO = new ObjectViewDAO<User>(sessionManager);
+var userService = new EntityService<User>(objectDAO, objectViewDAO);
 ```
 
-No changes are needed when using `RegisterLiteOrm()` (DI scenario) — `DataSourceProviderExtensions.LoadConfiguration` loads the `LiteOrm` node from the host `IConfiguration` automatically.
+- Custom DAOs deriving from the DAO base classes must forward the `SessionManager`: `public MyDAO(SessionManager sessionManager) : base(sessionManager) { }`.
+- `AddLiteOrm()` binds `SessionManager.Current` automatically when registering `SessionManager`; `RegisterLiteOrm()` enables scope tracking by default — no configuration required.
 
 ---
 
@@ -88,10 +96,14 @@ builder.Services.AddLiteOrm(options =>
 
 `AddLiteOrm()` registers the core services and generic DAOs/services (`IEntityService<T>`, `IEntityViewService<T>`, `IObjectDAO<T>`, etc.), and applies the compile-time registrations of `[AutoRegister]` services.
 
+As of v8.1.1, `AddLiteOrm()` binds `SessionManager.Current` automatically when registering `SessionManager` (resolving to the scope's instance), so no middleware or manual `SessionManager.SetCurrent(...)` is required.
+
 ### Enhanced `[AutoRegister]` Mechanism
 
 - `[AutoRegister]` can now be declared on a base class; derived classes inherit the registration behavior.
 - The `LiteOrm.Generators` source generator scans `[AutoRegister]` types at compile time and emits registration code (equivalent to runtime reflection scanning, but without `Assembly.GetTypes()` and compatible with NativeAOT trimming). Both `RegisterLiteOrm()` and `AddLiteOrm()` apply it automatically.
+- The registration scope is controlled by the `ServiceTypes` enum `AutoRegisterServiceTypes`: `All` (default — the implementation type itself and its interfaces), `Self` (itself only), `Interface` (interfaces only). The previous `Type[]` form is removed.
+- The Service and DAO base classes (`EntityService<T>`, `ObjectDAO<T>`, etc.) now carry `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`, so derived classes inherit it. Use `AutoRegisterServiceTypes.Interface` for interface resolution only, or `Self` for the implementation type only.
 
 ### AOT / NativeAOT Support
 
@@ -117,7 +129,7 @@ Make sure the host uses `RegisterLiteOrm()` (from `LiteOrm.DependencyInjection`)
 
 ### Q2: My business service doesn't declare `ServiceTypes`. Can it still be resolved via its interface?
 
-Yes. When `ServiceTypes` is not specified, the framework infers the non-system-namespace interfaces implemented by the type as service types. User-defined services resolved via interfaces need no explicit `ServiceTypes`.
+Yes. `[AutoRegister]`'s `ServiceTypes` defaults to `AutoRegisterServiceTypes.All`, which registers both the implementation type itself and its non-System-namespace interfaces, so interface-injected user services need no explicit `ServiceTypes`. To register interfaces only, use `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`.
 
 ### Q3: Will my existing MS DI `IServiceCollection` registrations still work?
 
@@ -127,15 +139,6 @@ Yes. `RegisterLiteOrm()` uses `AutofacServiceProviderFactory` internally to brid
 
 No. `RegisterLiteOrm()` loads the data source configuration from the `LiteOrm` node of the host `IConfiguration` automatically; the existing configuration format is unchanged.
 
----
+### Q5: Why is `SessionManager.Current` null?
 
-## Verification
-
-After upgrading, ensure:
-
-```bash
-dotnet build .\LiteOrm.sln
-dotnet test .\LiteOrm.sln
-```
-
-The full test suite passing is the verification baseline for this release.
+Scope tracking is enabled automatically with `RegisterLiteOrm()` / `AddLiteOrm()` — no configuration required. In manual management scenarios, call `SessionManager.SetCurrent(...)` to set the current session.
