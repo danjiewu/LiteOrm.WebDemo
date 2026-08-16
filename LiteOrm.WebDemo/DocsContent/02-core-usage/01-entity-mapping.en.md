@@ -45,10 +45,12 @@ public class User
 
 ```csharp
 [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
-[Column("Age", DbType = DbType.Int32)]
+[Column("Age", DbType = DbValueType.Int32)]
+[Column("Tags", DbType = DbValueType.Array)]      // PostgreSQL text[]
+[Column("Meta", DbType = DbValueType.Jsonb)]      // PostgreSQL jsonb
 ```
 
-> Complex objects cannot declare a serialization type directly via the `[Column]` attribute. To store a complex object, serialize it to a string and persist it in a string column, performing custom conversion in the property getter/setter.
+> `DbType` is of the `DbValueType` enum type, defaulting to `DbValueType.Default` (meaning "not specified — inferred from the property type").
 
 | Parameter | Description |
 |-----------|-------------|
@@ -57,7 +59,73 @@ public class User
 | `IsIdentity` | Whether it is an identity column. |
 | `IdentityStart` | Identity column start value, default `1`. Only takes effect on databases that support start value (SQL Server, Dameng, Oracle); MySQL via table-level `AUTO_INCREMENT = n` option; SQLite does not support customization. |
 | `IdentityIncreasement` | Identity column increment value, default `1`. Only takes effect on databases that support increment (SQL Server, Dameng, Oracle); MySQL requires session variable `auto_increment_increment`; SQLite does not support customization. |
-| `DbType` | Database column type (`System.Data.DbType` enum), defaults to `DbType.Object` (inferred from the property type). |
+| `DbType` | Database column type (`DbValueType` enum), defaults to `DbValueType.Default` (inferred from the property type). `Json`/`Jsonb` denote JSON/JSONB columns, and `Array` denotes an array column. |
+| `Expression` | Computed column expression (non-actual column); reference other properties of the same entity via `{PropertyName}`, or write a dialect-specific raw SQL fragment. |
+| `ColumnMode` | Column operation mode (`ColumnMode` enum), defaults to `Full`. Set to `ColumnMode.Computed` for computed columns. |
+
+### Array Columns (PostgreSQL)
+
+Collection-typed properties (`int[]`, `string[]`, `List<T>`, etc.) are inferred as `DbValueType.Array` when no `DbType` is specified. Native-array dialects such as PostgreSQL emit array column types (`integer[]`, `text[]`); other dialects fall back to text-JSON storage:
+
+```csharp
+[Table("Products")]
+public class Product
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+
+    [Column("Tags")]
+    public string[]? Tags { get; set; }   // inferred as DbValueType.Array → PostgreSQL text[]
+
+    [Column("Scores")]
+    public int[]? Scores { get; set; }    // → PostgreSQL integer[]
+}
+```
+
+### JSON / JSONB Columns
+
+```csharp
+[Table("Products")]
+public class Product
+{
+    [Column("Meta", DbType = DbValueType.Json)]     // text JSON (portable across databases)
+    public string? Meta { get; set; }
+
+    [Column("Attributes", DbType = DbValueType.Jsonb)]  // PostgreSQL jsonb
+    public string? Attributes { get; set; }
+}
+```
+
+> JSON columns serialize complex objects to JSON strings on write and deserialize them back to the property type on read.
+
+### Computed Columns (Non-Actual Columns)
+
+A computed column does not create a physical database column and is excluded from inserts/updates; queries return the value via `Expression`, and references to the property in query conditions also render the expression. Within the expression, use `{PropertyName}` to reference other properties of the same entity — placeholders are rendered as column names (with the required quoting and table qualification). You may also write a dialect-specific raw SQL fragment.
+
+```csharp
+[Table("Users")]
+public class User
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+
+    [Column("FirstName")]
+    public string? FirstName { get; set; }
+
+    [Column("LastName")]
+    public string? LastName { get; set; }
+
+    // Computed column: no physical column; SELECT returns (FirstName || ' ' || LastName), WHERE renders the expression too
+    [Column("FullName", Expression = "{FirstName} || ' ' || {LastName}", ColumnMode = ColumnMode.Computed)]
+    public string? FullName { get; set; }
+}
+```
+
+- **No physical column**: skipped by `CREATE TABLE` / `ALTER TABLE ADD COLUMN`, and not written on insert/update.
+- **Expression result**: the default SELECT renders `({expr}) AS "PropertyName"` and the read result is mapped back to the property.
+- **Query conditions**: `SearchAsync(u => u.FullName == "John Smith")` produces `WHERE ("FirstName" || ' ' || "LastName") = @0`.
+- Setting `Expression` alone (without `ColumnMode.Computed`) is also treated as a computed column; declaring `ColumnMode = ColumnMode.Computed` is recommended.
+- The expression is dialect-specific (the example uses SQLite/PostgreSQL `||`; MySQL uses `CONCAT(...)`).
 
 ## `[PropertyOrder]` Attribute
 
