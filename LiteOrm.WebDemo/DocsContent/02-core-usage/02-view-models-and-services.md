@@ -16,6 +16,8 @@ public class UserView : User
 
 这样查询 `UserView` 时，LiteOrm 能根据外键关系自动生成 JOIN。
 
+`ForeignColumn` 支持声明自己的列级转换器：`[ForeignColumn(typeof(Department), Property = "Name", ConverterType = typeof(SomeValueConverter))]`。读取时**优先使用自身声明的 `ConverterType`，否则回退目标列的转换器**；`ConverterType` 用法与 `ColumnAttribute.ConverterType` 一致（提供实现 `IDbValueConverter` 的转换器类型）。
+
 ## Service 定义
 
 ### 实体类型与视图类型相同
@@ -100,7 +102,7 @@ var summary = await userService.SearchAsAsync<UserSummary>(
 
 - `ObjectDAO<T>` 负责实体写操作，本身**没有** `Search(...)` 查询入口。
 - `ObjectViewDAO<T>` 提供最完整的查询能力，包括 `Search(...)`、`SearchAs(...)` 以及 `ExprString` 入口。
-- Service 查询侧同样提供 `Search(...)`，并新增了基于 `SelectExpr` 的 `SearchAs(...)` / `SearchAsAsync(...)`，适合在服务层做结果投影。
+- Service 查询侧同样提供 `Search(...)`，并支持基于 `SelectExpr` 的 `SearchAs(...)` / `SearchAsAsync(...)`，以及 IQueryable Lambda 投影的 `SearchAs(...)` / `SearchOneAs(...)` / `SearchAsAsync(...)` / `SearchOneAsAsync(...)`，适合在服务层做结果投影。
 - 如果你既要写入实体，又要读取视图，通常会在 Service 里同时组合 `ObjectDAO<T>` 和 `ObjectViewDAO<TView>`。
 
 ## 什么时候该用哪一种

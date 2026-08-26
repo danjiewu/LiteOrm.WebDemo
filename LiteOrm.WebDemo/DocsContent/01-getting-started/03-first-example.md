@@ -58,6 +58,7 @@ using LiteOrm;
 using LiteOrm.Common;
 using LiteOrm.Service;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 // 1. 配置数据源
 var dataSourceProvider = new DataSourceProvider();
@@ -77,10 +78,16 @@ var poolFactory = new DAOContextPoolFactory(dataSourceProvider);
 var sessionManager = new SessionManager(poolFactory);
 SessionManager.SetCurrent(() => sessionManager);
 
-// 4. 创建 DAO 和服务
-var objectDAO = new ObjectDAO<User>();
-var objectViewDAO = new ObjectViewDAO<User>();
-var userService = new EntityService<User>(objectDAO, objectViewDAO);
+// 4. 构建最小服务提供程序并解析服务（8.1.3 起，EntityService/EntityViewService 构造函数接收 IServiceProvider）
+var services = new ServiceCollection();
+services.AddScoped(_ => sessionManager);
+services.AddScoped(typeof(ObjectDAO<>));
+services.AddScoped(typeof(ObjectViewDAO<>));
+services.AddScoped(typeof(EntityService<>));
+services.AddScoped(typeof(EntityViewService<>));
+var serviceProvider = services.BuildServiceProvider();
+
+var userService = serviceProvider.GetRequiredService<EntityService<User>>();
 ```
 
 #### 方式二：从配置文件读取
@@ -112,6 +119,7 @@ using LiteOrm;
 using LiteOrm.Common;
 using LiteOrm.Service;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 // 1. 读取配置文件
 var configuration = new ConfigurationBuilder()
@@ -130,10 +138,16 @@ var poolFactory = new DAOContextPoolFactory(dataSourceProvider);
 var sessionManager = new SessionManager(poolFactory);
 SessionManager.SetCurrent(() => sessionManager);
 
-// 5. 创建 DAO 和服务
-var objectDAO = new ObjectDAO<User>();
-var objectViewDAO = new ObjectViewDAO<User>();
-var userService = new EntityService<User>(objectDAO, objectViewDAO);
+// 5. 构建最小服务提供程序并解析服务（8.1.3 起，EntityService/EntityViewService 构造函数接收 IServiceProvider）
+var services = new ServiceCollection();
+services.AddScoped(_ => sessionManager);
+services.AddScoped(typeof(ObjectDAO<>));
+services.AddScoped(typeof(ObjectViewDAO<>));
+services.AddScoped(typeof(EntityService<>));
+services.AddScoped(typeof(EntityViewService<>));
+var serviceProvider = services.BuildServiceProvider();
+
+var userService = serviceProvider.GetRequiredService<EntityService<User>>();
 ```
 
 > 使用 `LoadConfiguration` 需额外安装 `Microsoft.Extensions.Configuration` 和 `Microsoft.Extensions.Configuration.Json` 包。基础库本身仅依赖 `Microsoft.Extensions.Configuration.Abstractions`（提供 `IConfiguration` 接口）。
@@ -143,7 +157,8 @@ var userService = new EntityService<User>(objectDAO, objectViewDAO);
 > - `LiteOrmSqlFunctionInitializer.Initialize()`：SQL 函数映射在首次访问 SqlBuilder 时由静态构造函数自动注册，无需手动调用。
 > - `DAOContextPoolFactory`：根据数据源配置创建连接池，管理连接的获取与回收。通过构造函数传入 `SessionManager`，DAO 内部通过 `SessionManager.GetDAOContextPool()` 获取连接池以解析提供程序类型。
 > - `SessionManager`：管理数据库会话、事务和异步上下文。通过 `SetCurrent` 设置为当前异步上下文的会话。
-> - `ObjectDAO<T>` / `ObjectViewDAO<T>`：分别负责增删改和查询的数据访问对象。两者均有无参构造函数，内部通过 `TableInfoProvider.Instance` 获取全局单例，无需手动传入。
+> - `ObjectDAO<T>` / `ObjectViewDAO<T>`：分别负责增删改和查询的数据访问对象。两者自 8.1.1 起构造时需传入 `SessionManager`，内部通过 `TableInfoProvider.Instance` 获取全局单例。依赖注入场景下由容器自动解析，手动构造则需自行传入已创建好的 `sessionManager`。
+> - `ServiceCollection` / `ServiceProvider`：自 8.1.3 起 `EntityService<T>` / `EntityViewService<T>` 构造函数接收 `IServiceProvider`，由容器解析其所需的 `ObjectDAO<T>` / `ObjectViewDAO<T>`。此处仅注册最少服务以演示手动场景；常规项目建议使用下文 2.2 的 `AddLiteOrm()`。
 > - `EntityService<T>`：封装了 DAO 的业务服务，提供 `InsertAsync`、`SearchAsync`、`UpdateAsync`、`DeleteAsync` 等方法。
 
 ### 2.2 通过 AddLiteOrm 注册和获取服务（推荐）
@@ -168,16 +183,12 @@ builder.Services.AddLiteOrm(options =>
 // 2. 构建 Host，其 Services 即为 ServiceProvider
 var host = builder.Build();
 var serviceProvider = host.Services;
-
-// 3. 将 SessionManager 的解析委托给 ServiceProvider
-//    SessionManager.SetCurrent 接受一个工厂委托，
-//    在首次访问 SessionManager.Current 时延迟执行并缓存结果
-SessionManager.SetCurrent(() => serviceProvider.GetService<SessionManager>());
 ```
 
 > **`AddLiteOrm()` 注册了哪些服务？**
 > - 单例：`IDataSourceProvider`（从 `IConfiguration` 的 `LiteOrm` 节点加载）、`DAOContextPoolFactory`、`TableInfoProvider`。
 > - Scoped：`SessionManager`、泛型 `ObjectDAO<>` / `ObjectViewDAO<>`、`EntityService<>` / `EntityViewService<>`（含 `IObjectDAO<>`、`IEntityService<>` 等接口注册）。
+> - `AddLiteOrm()` 会在注册 `SessionManager` 时自动绑定 `SessionManager.Current`, 无需手动调用 `SessionManager.SetCurrent(...)`。
 > - 若 `AutoRegisterServices = true`（默认），还会应用 `[AutoRegister]` 自定义服务与 DAO 的编译期自动注册。
 
 > **需要安装哪些包？** `AddLiteOrm()` 从 DI 容器中解析 `IConfiguration`。`Host.CreateApplicationBuilder` 会自动加载 `appsettings.json` 并注册配置（含 `IConfiguration`），因此控制台应用只需额外安装 `Microsoft.Extensions.Hosting` 包，无需再手动构建 `ServiceCollection`。
@@ -204,21 +215,9 @@ Console.WriteLine($"插入成功，自增 Id = {user.Id}");
 ```
 
 > **作用域与 SessionManager 的关系**：
-> `SessionManager` 注册为 Scoped，每个 `CreateScope()`（如每个 Web 请求）创建的作用域会获得独立的 `SessionManager` 实例。但 `SessionManager.SetCurrent` 设置的是**当前异步上下文**（`AsyncLocal`）的会话工厂，它只会在首次访问时执行一次委托并缓存。
+> `SessionManager` 注册为 Scoped，每个 `CreateScope()`（如每个 Web 请求）创建的作用域会获得独立的 `SessionManager` 实例。`AddLiteOrm()` 在注册 `SessionManager` 时已自动绑定 `SessionManager.Current`（解析到当前作用域实例），因此无需手动调用 `SetCurrent` 或编写中间件。
 >
-> 在多作用域场景下（如 Web 请求），每个作用域需要使用各自的 `SessionManager`。建议使用中间件（Filter）在每个请求进入时，将当前请求作用域的 `SessionManager` 设为当前会话：
->
-> ```csharp
-> // 在每个请求作用域内，将 SessionManager 绑定到当前异步上下文
-> app.Use(async (context, next) =>
-> {
->     var sp = context.RequestServices;   // 当前请求作用域的 ServiceProvider
->     SessionManager.SetCurrent(() => sp.GetService<SessionManager>());
->     await next();
-> });
-> ```
->
-> 提示：使用 `LiteOrm.DependencyInjection`（Autofac）时无需手写中间件——`RegisterLiteOrm()` 内置作用域跟踪（`RegisterScope`，默认开启），会在每个作用域进入/退出时自动更新当前会话。
+> 提示：使用 `LiteOrm.DependencyInjection`（Autofac）时同样无需配置——`RegisterLiteOrm()` 自动启用作用域跟踪，会在每个作用域进入/退出时自动更新当前会话。
 
 应用退出时释放资源：
 
@@ -358,9 +357,9 @@ poolFactory.Dispose();
 
 ### 问题二：`Object reference not set to instance` 或 `SessionManager.Current` 为 null
 
-**原因**：忘记调用 `SessionManager.SetCurrent(() => sessionManager)`。
+**原因**：手动构造方式下忘记调用 `SessionManager.SetCurrent(() => sessionManager)`（使用 `AddLiteOrm()` 时会自动绑定，不会出现此问题）。
 
-**解决方法**：确保在创建服务实例之前调用 `SessionManager.SetCurrent(() => sessionManager)`，否则 DAO 在执行 SQL 时无法获取数据库连接。
+**解决方法**：手动构造场景下，确保在创建服务实例之前调用 `SessionManager.SetCurrent(() => sessionManager)`；使用 `AddLiteOrm()` 时无需手动调用，框架会自动绑定。否则 DAO 在执行 SQL 时无法获取数据库连接。
 
 ### 问题三：`Function 'XXX' is not supported` 异常
 
@@ -371,8 +370,7 @@ poolFactory.Dispose();
 ## 运行验证清单
 
 - [ ] `dotnet build` 编译通过，无错误。
-- [ ] 初始化代码中调用了 `SessionManager.SetCurrent(...)`（手动构造或 ServiceProvider 方式）。
-- [ ] 使用 ServiceProvider 方式时，`SessionManager` 注册为 Scoped，且在进入作用域时调用了 `SetCurrent`。
+- [ ] 手动构造方式下已调用 `SessionManager.SetCurrent(...)`；使用 `AddLiteOrm()` 时自动绑定，无需手动调用。
 - [ ] 实体类使用了 `[Table]` 和 `[Column]` 特性标注。
 - [ ] 插入和查询操作返回了预期的结果。
 - [ ] 应用退出前释放了 `ServiceProvider`（或 `SessionManager`）和 `DAOContextPoolFactory`。
