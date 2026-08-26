@@ -15,7 +15,7 @@ public static class DynamicControllerBuilder
     {
         var assemblyName = new AssemblyName("DynamicControllers");
         var assemblyBuilder = AssemblyBuilder.DefineDynamicAssembly(assemblyName, AssemblyBuilderAccess.Run);
-        var moduleBuilder = assemblyBuilder.DefineDynamicModule(assemblyName.Name);
+        var moduleBuilder = assemblyBuilder.DefineDynamicModule(assemblyName.Name!);
 
         foreach (var definition in DynamicQueryMetadata.GetEntities(defaultNamespace))
         {
@@ -36,7 +36,7 @@ public static class DynamicControllerBuilder
 
             var il = ctorBuilder.GetILGenerator();
             il.Emit(OpCodes.Ldarg_0);
-            il.Emit(OpCodes.Call, parentType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, Type.EmptyTypes));
+            il.Emit(OpCodes.Call, parentType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, Type.EmptyTypes)!);
             il.Emit(OpCodes.Ret);
 
             typeBuilder.CreateType();

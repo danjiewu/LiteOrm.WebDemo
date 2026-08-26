@@ -60,7 +60,7 @@ public sealed class SqlConversionService
             if (expr is not SelectExpr) expr = new SelectExpr()
             {
                 Source = expr.ToSource(viewType),
-                Selects = TableInfoProvider.Instance.GetTableView(viewType).SelectColumns.Select((col, i) => new SelectItemExpr(Expr.Prop(col.PropertyName), col.PropertyName)).ToList()
+                Selects = TableInfoProvider.Instance.GetTableView(viewType)!.SelectColumns.Select((col, i) => new SelectItemExpr(Expr.Prop(col.PropertyName), col.PropertyName)).ToList()
             };
             result.RegeneratedSql = sqlGen.ToSql(expr).Sql;
         }
