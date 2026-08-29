@@ -98,7 +98,7 @@ Types marked with `[AutoRegister]` are automatically registered into the DI cont
 | Non-AOT (default) | Runtime assembly scan | `LiteOrmAutoRegistration.Apply()` reflects over referenced assemblies for `[AutoRegister]` types |
 
 - Both paths are controlled by the `AutoRegisterServices` option (default `true`); set to `false` to skip auto-registration entirely and register services manually.
-- The registration scope is controlled by the `ServiceTypes` enum `AutoRegisterServiceTypes` on `[AutoRegister]`: `All` (default — the implementation type itself + interfaces), `Self` (itself only), `Interface` (interfaces only).
+- The registration scope is controlled by the `Policy` enum `RegisterPolicy` on `[AutoRegister]`: `All` (default — the implementation type itself + interfaces), `Self` (itself only), `Interface` (interfaces only).
 - `AddLiteOrm()`: applies generated code in AOT mode, runtime scan in non-AOT mode (auto-dispatched via `RuntimeFeature.IsDynamicCodeSupported`).
 - `RegisterLiteOrm()`: Autofac assembly-scan registration; automatically applies Castle interceptors from `[InterceptAttribute]`, the `IEntityService` interface family, and types carrying `[Service]` (`IsService=true`) via `ServiceInvokeInterceptor`.
 
@@ -368,20 +368,24 @@ var factory = scope.ServiceProvider.GetRequiredService<ServiceFactory>();
 
 ### Service exception handling event
 
+Subscribe to service exceptions by injecting `IServiceExceptionEvent` (notification-only; does not affect the call flow):
+
 ```csharp
-// Global static event, raised when a service method throws
-ServiceInvokeInterceptor.ExceptionHandling += (sender, context) =>
+public class ExceptionEvent : IServiceExceptionEvent
 {
-    // Access exception, method name, arguments, SQL stack, and more
-    if (context.Exception is TimeoutException)
-        context.Handle(123); // convert exception into an agreed result
-};
+    public void OnException(ServiceExceptionContext context)
+    {
+        // Access exception, method name, arguments, SQL stack, and more
+    }
+}
+
+services.AddScoped<ExceptionEvent>();
+services.AddScoped<IServiceExceptionEvent>(sp => sp.GetRequiredService<ExceptionEvent>());
 ```
 
-- `ServiceInvokeInterceptor.ExceptionHandling` is a global static event
-- `RemoteServiceInvokeInterceptor.ExceptionHandling` behaves the same
-- Without calling `context.Handle(...)`, the exception still propagates, which suits alerting/metrics
-- Calling `context.Handle(result)` converts the exception into a normal return value
+- `ServiceInvokeInterceptor` notifies the call lifecycle through three injected event interfaces: `IServiceInvokingEvent` / `IServiceInvokedEvent` / `IServiceExceptionEvent`
+- The exception event is notification-only; the exception is always rethrown as-is
+- `RemoteServiceInvokeInterceptor.ExceptionHandling` remains a static event for remote services and can convert an exception into an agreed result
 
 ## 7. Attribute quick reference
 

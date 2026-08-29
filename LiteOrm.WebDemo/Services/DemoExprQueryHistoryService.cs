@@ -16,7 +16,7 @@ public interface IDemoExprQueryHistoryService :
     Task<bool> DeleteAsync(AuthSessionUser currentUser, int id, CancellationToken cancellationToken = default);
 }
 [AutoRegister(Lifetime = Lifetime.Scoped)]
-public class DemoExprQueryHistoryService(ObjectDAO<DemoExprQueryHistory> dao, ObjectViewDAO<DemoExprQueryHistory> viewDao) : EntityService<DemoExprQueryHistory>(dao, viewDao), IDemoExprQueryHistoryService
+public class DemoExprQueryHistoryService(IServiceProvider serviceProvider) : EntityService<DemoExprQueryHistory>(serviceProvider), IDemoExprQueryHistoryService
 {
     public async Task SaveAsync(AuthSessionUser currentUser, string exprJson, CancellationToken cancellationToken = default)
     {

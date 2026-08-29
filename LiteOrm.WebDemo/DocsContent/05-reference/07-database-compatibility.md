@@ -87,7 +87,7 @@ LiteOrm 内置 11 个数据库方言的 `SqlBuilder` 实现（含 6 个国产/�
 
 ### 2.2 类型映射差异
 
-不同数据库对 .NET 类型的处理方式不同，`SqlBuilder` 子类在 `GetDbTypeInternal` / `ConvertToDbValue` 中做了针对性处理：
+不同数据库对 .NET 类型的处理方式不同，`SqlBuilder` 子类在 `GetDbTypeInternal` / `ToDbValue`（经 `LiteOrm.Common.DbConverterHelper` 统一分发）中做了针对性处理：
 
 | 数据库 | 特殊处理 |
 |--------|---------|
@@ -132,7 +132,48 @@ LiteOrm 内置 11 个数据库方言的 `SqlBuilder` 实现（含 6 个国产/�
 | PostgreSQL / SQLite / Oracle / 达梦 | `||` 运算符 |
 | MySQL / OceanBase / TiDB / GreatDB | `CONCAT(...)` 函数（基类默认） |
 
-### 2.5 标识符引用与参数前缀
+### 2.5 字符串常量内联
+
+`ISqlBuilder.TryAppendSqlLiteral` 方法用于将字符串常量（`Expr.Const(string)`）直接内联为 SQL 字面量。仅含常规字符（不含反斜杠、控制字符）的字符串可安全内联——单引号以标准 `''` 转义；含反斜杠或控制字符的字符串返回 `false`，由调用方改用参数化查询，规避 MySQL 反斜杠注入风险。此行为跨所有数据库一致，无需各方言覆盖。
+
+### 2.5 内置 SQL 函数注册
+
+`LiteOrmSqlFunctionInitializer` 在启动时为各数据库注册 SQL 函数处理器，将 C# 方法名（经 `LambdaExprConverter` 转为 `FunctionExpr`）映射到正确的数据库函数。未注册的函数名走默认渲染（直接输出 `函数名(参数)`），标准同名函数（如 `ABS`、`ROUND`、`FLOOR`、`SQRT`、`SIN`、`COALESCE` 等）无需注册。
+
+| 函数 | 基类 (SQLite/MySQL/SQLServer) | Oracle | PostgreSQL | SQL Server |
+|------|------|--------|------------|------------|
+| `ToLower` | `LOWER` | — | — | — |
+| `ToUpper` | `UPPER` | — | — | — |
+| `Pow` | `POWER` | — | — | — |
+| `Char` | `CHAR` | `CHR` | `CHR` | — |
+| `Ceiling` | `CEILING` | `CEIL` | `CEIL` | — |
+| `Truncate` | `TRUNCATE(x,0)` | `TRUNC` | `TRUNC` | `ROUND(x,0,1)` |
+| `Concat` | `CONCAT` | `||` | — | — |
+| `Log` | `LOG` (自然对数) | `LN` | `LN` | — |
+| `Log10` | `LOG10` | `LOG(10,x)` | `LOG` | — |
+| `Atan2` | `ATAN2` | — | — | `ATN2` |
+| `Max` (标量) | `GREATEST` | — | — | — |
+| `Min` (标量) | `LEAST` | — | — | — |
+| `Max`/`Min` (SQLite) | — | — | — | `max`/`min` |
+
+> `Max`/`Min` 通过 `IsAggregate` 区分聚合（`MAX`/`MIN`）与标量（`GREATEST`/`LEAST`）；SQLite 的 `max`/`min` 同时支持标量与聚合。
+>
+> 日期/时间函数（`Now`、`Today`、`Add*`、`DateDiff*`、`Total*`、`Format`）、字符串函数（`IndexOf`、`Substring`、`Trim`/`TrimStart`/`TrimEnd`、`Remove`）、JSON 函数（`JsonExtract`、`JsonValue` 等）均已按各方言注册，详见 `LiteOrmSqlFunctionInitializer`。
+
+#### 正则表达式函数
+
+`Regex` Lambda 方法经 `LambdaExprConverter` 映射为 `REGEXP_*` 函数，由各方言注册处理器生成对应 SQL：
+
+| C# 方法 | SQL 函数 | 基类 (SQLite/Oracle/SQLServer) | MySQL | PostgreSQL |
+|---------|----------|------|-------|------------|
+| `Regex.IsMatch` / `.Success` | `REGEXP_LIKE` | `REGEXP_LIKE(a, b)` | `a REGEXP b` | `a ~ b` |
+| `Regex.Replace` | `REGEXP_REPLACE` | `REGEXP_REPLACE(a, b, c)` | 同名 | 同名 |
+| `Regex.Match().Value` | `REGEXP_SUBSTR` | `REGEXP_SUBSTR(a, b)` | 同名 | 同名 |
+| `Regex.Match().Index` | `REGEXP_INSTR - 1` | `REGEXP_INSTR(a, b) - 1` | 同名 | 同名 |
+
+> `REGEXP_INSTR` 在 Oracle/MySQL 为 1 基，映射时自动减 1 转为 C# 的 0 基 `Match.Index`。`Regex.IsMatch`/`Replace` 支持静态形式、`new Regex(pattern)` 实例形式与闭包变量形式（实例形式通过求值 Regex 对象反射读取 Pattern）。
+
+### 2.6 标识符引用与参数前缀
 
 | 数据库 | 标识符引用 | 参数前缀 | 名称大小写处理 |
 |--------|-----------|---------|---------------|
@@ -142,14 +183,14 @@ LiteOrm 内置 11 个数据库方言的 `SqlBuilder` 实现（含 6 个国产/�
 | PostgreSQL / 金仓 / GaussDB | `"name"`（双引号） | `@` | 转小写 |
 | SQLite | `"name"`（双引号） | `@` | 不转换 |
 
-### 2.6 集合操作
+### 2.7 集合操作
 
 | 数据库 | EXCEPT 对应语法 |
 |--------|----------------|
 | Oracle / 达梦 | `MINUS` |
 | 其他 | `EXCEPT`（基类默认） |
 
-### 2.7 批量更新
+### 2.8 批量更新
 
 | 数据库 | 批量更新方式 |
 |--------|-------------|
@@ -159,7 +200,7 @@ LiteOrm 内置 11 个数据库方言的 `SqlBuilder` 实现（含 6 个国产/�
 | PostgreSQL / 金仓 / GaussDB | `UPDATE table u SET ... FROM (VALUES ...) AS v(...) WHERE u.key = v.k0` |
 | SQLite | `WITH batch_data(...) AS (VALUES (...)) UPDATE table SET col = (SELECT ... FROM batch_data WHERE ...) WHERE EXISTS (...)` |
 
-### 2.8 批量插入
+### 2.9 批量插入
 
 | 数据库 | 批量插入方式 |
 |--------|-------------|

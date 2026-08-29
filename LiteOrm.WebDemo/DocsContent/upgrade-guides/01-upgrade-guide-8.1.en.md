@@ -29,12 +29,20 @@ As of v8.1.1, `DAOBase` and the DAO base classes (`ObjectDAO<T>`, `ObjectViewDAO
 // Old (v8.1.0 and lower)
 var objectDAO = new ObjectDAO<User>();
 var objectViewDAO = new ObjectViewDAO<User>();
-var userService = new EntityService<User>(objectDAO, objectViewDAO);
 
-// New (v8.1.1)
+// New (as of v8.1.1, DAO constructors require a SessionManager)
 var objectDAO = new ObjectDAO<User>(sessionManager);
 var objectViewDAO = new ObjectViewDAO<User>(sessionManager);
-var userService = new EntityService<User>(objectDAO, objectViewDAO);
+
+// As of 8.1.3, EntityService/EntityViewService constructors take an IServiceProvider; resolve from a container
+var services = new ServiceCollection();
+services.AddScoped(_ => sessionManager);
+services.AddScoped(typeof(ObjectDAO<>));
+services.AddScoped(typeof(ObjectViewDAO<>));
+services.AddScoped(typeof(EntityService<>));
+services.AddScoped(typeof(EntityViewService<>));
+var serviceProvider = services.BuildServiceProvider();
+var userService = serviceProvider.GetRequiredService<EntityService<User>>();
 ```
 
 - Custom DAOs deriving from the DAO base classes must forward the `SessionManager`: `public MyDAO(SessionManager sessionManager) : base(sessionManager) { }`.
@@ -149,15 +157,17 @@ builder.Services.AddLiteOrm(options =>
 
 - `[AutoRegister]` can now be declared on a base class; derived classes inherit the registration behavior.
 - The `LiteOrm.Generators` source generator scans `[AutoRegister]` types at compile time and emits registration code (equivalent to runtime reflection scanning, but without `Assembly.GetTypes()` and compatible with NativeAOT trimming). Both `RegisterLiteOrm()` and `AddLiteOrm()` apply it automatically.
-- The registration scope is controlled by the `ServiceTypes` enum `AutoRegisterServiceTypes`: `All` (default — the implementation type itself and its interfaces), `Self` (itself only), `Interface` (interfaces only). The previous `Type[]` form is removed.
-- The Service and DAO base classes (`EntityService<T>`, `ObjectDAO<T>`, etc.) now carry `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`, so derived classes inherit it. Use `AutoRegisterServiceTypes.Interface` for interface resolution only, or `Self` for the implementation type only.
+- The registration scope is controlled by the `Policy` enum `RegisterPolicy`: `All` (default — the implementation type itself and its interfaces), `Self` (itself only), `Interface` (interfaces only). The previous `Type[]` form is removed.
+- The Service and DAO base classes (`EntityService<T>`, `ObjectDAO<T>`, etc.) now carry `[AutoRegister(RegisterPolicy.All, Lifetime = Lifetime.Scoped)]`, so derived classes inherit it. Use `RegisterPolicy.Interface` for interface resolution only, or `Self` for the implementation type only.
 
 #### AOT / NativeAOT Support
 
 - The **net8.0 / net10.0** targets are AOT-compatible (`IsAotCompatible`) and work under NativeAOT and full trimming.
 - When building with `PublishAot=true` or trimming enabled, `LiteOrm.Generators` emits registration code for entity types, `SqlBuilder`/`DbConnection` types, DataReader mapping delegates and property accessors at compile time, so the runtime does not rely on `Expression.Compile()` or `Assembly.GetTypes()`.
 - `Expr` trees are serialized via the source-generated `ExprJsonSerializerContext` — no reflection, NativeAOT-safe.
-- When using `LiteOrm.DependencyInjection` AOP interception in an AOT publish, enable Castle DynamicProxy emulation (`ProxyGenerator.EnableDynamicProxyEmulation()`, Castle.Core 5.1+).
+- **`LiteOrm.DependencyInjection` is NOT supported under AOT**: Autofac- and Castle DynamicProxy-based AOP interception relies on runtime reflection and dynamic assembly generation, which is incompatible with NativeAOT. Use the core library's `AddLiteOrm()` for pure MS DI registration instead (see the `LiteOrm.AotDemo` project).
+- **`LiteOrm.Remote` / `LiteOrm.Remote.Server` are NOT supported under AOT**: remote service invocation relies on reflection-based System.Text.Json and runtime Type resolution (already annotated with `[RequiresDynamicCode]` / `[RequiresUnreferencedCode]`), which is incompatible with NativeAOT.
+- See the `LiteOrm.AotDemo` project (`PublishAot=true` + `TrimMode=full`) for a complete AOT publishing reference.
 
 ### Improvements
 
@@ -178,7 +188,7 @@ Make sure the host uses `RegisterLiteOrm()` (from `LiteOrm.DependencyInjection`)
 
 ### Q2: My business service doesn't declare `ServiceTypes`. Can it still be resolved via its interface?
 
-Yes. `[AutoRegister]`'s `ServiceTypes` defaults to `AutoRegisterServiceTypes.All`, which registers both the implementation type itself and its non-System-namespace interfaces, so interface-injected user services need no explicit `ServiceTypes`. To register interfaces only, use `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`.
+Yes. `[AutoRegister]`'s `Policy` defaults to `RegisterPolicy.All`, which registers both the implementation type itself and its non-System-namespace interfaces, so interface-injected user services need no explicit `Policy`. To register interfaces only, use `[AutoRegister(RegisterPolicy.Interface, Lifetime = Lifetime.Scoped)]`.
 
 ### Q3: Will my existing MS DI `IServiceCollection` registrations still work?
 

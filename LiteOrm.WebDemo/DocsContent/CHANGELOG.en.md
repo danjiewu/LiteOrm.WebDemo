@@ -1,9 +1,99 @@
 # Changelog
 
+## v8.1.4 (2026-08-24)
+
+### Breaking Changes
+
+	- Properties of complex types (arrays/collections, custom classes) are **no longer auto-mapped as table columns**; they require an explicit `[Column]` (and, as appropriate, `DbType = Array`).Known scalars (numerics, `string`/`char`, `byte[]`, `Guid`, dates, enums) and `Json`/`Jsonb` mapped types are still auto-mapped.
+- `EntityService<T>` / `EntityService<T, TView>` / `EntityViewService<T>` constructors now take an `IServiceProvider`, resolving the required `ObjectDAO<T>` / `ObjectViewDAO<T>` from the container; derived service constructors were updated accordingly. No changes are needed under DI.
+- `ServiceInvokeInterceptor` removed the **global static `ExceptionHandling` event** (and the `context.Handle(...)` suppress/convert-result mechanism), replaced by dependency-injected service-call events; exceptions are notified and then rethrown as-is.
+- `EntityService<T>` / `EntityService<T, TView>` removed the `protected virtual` `*Core` methods (`InsertCore` / `UpdateCore` / `DeleteCore` / `DeleteIDCore` / `UpdateOrInsertCore` and their async variants); their logic is inlined into the public methods. Custom services that override these methods must be adjusted.
+
+### Enhancements
+
+- Both `ColumnAttribute` and `ForeignColumnAttribute` now expose `ConverterType` to declare a column-level converter. When reading a foreign projection column, `ForeignColumn` **prefers its own declared converter, otherwise falls back to the target column's**.
+- Cross-numeric-type conversion is now registered by default (covering `decimal`/`float`/`double` and the integer family, e.g. `Decimal→Int32`), so no manual registration is needed.
+- Value-conversion mechanism optimized: conversion now converges on a delegating converter, resolved with a fixed priority of column-level converter → registry keyed by (value type, database value type) → direct assignment; null/`DBNull`/empty-string values are short-circuited up front, and no generic fallback is applied when nothing is registered or no conversion is needed.
+- Registered cross-dialect SQL functions for all database builders so that C# method names converted via `LambdaExprConverter` no longer produce invalid SQL due to name mismatch or dialect differences:
+
+  | Function | Base (SQLite/MySQL/SQLServer) | Oracle | PostgreSQL | SQL Server |
+  |----------|------|--------|------------|------------|
+  | `ToLower` | `LOWER` | — | — | — |
+  | `ToUpper` | `UPPER` | — | — | — |
+  | `Pow` | `POWER` | — | — | — |
+  | `Char` | `CHAR` | `CHR` | `CHR` | — |
+  | `Ceiling` | `CEILING` | `CEIL` | `CEIL` | — |
+  | `Truncate` | `TRUNCATE(x,0)` | `TRUNC` | `TRUNC` | `ROUND(x,0,1)` |
+  | `Concat` | `CONCAT` | `||` | — | — |
+  | `Log` | `LOG` | `LN` | `LN` | — |
+  | `Log10` | `LOG10` | `LOG(10,x)` | `LOG` | — |
+  | `Atan2` | `ATAN2` | — | — | `ATN2` |
+  | `Max` (scalar) | `GREATEST` | — | — | — |
+  | `Min` (scalar) | `LEAST` | — | — | — |
+  | `Max`/`Min` (SQLite) | — | — | — | `max`/`min` |
+
+  - `Max`/`Min` distinguish aggregate (`MAX`/`MIN`) from scalar (`GREATEST`/`LEAST`) via `IsAggregate`; SQLite's `max`/`min` support both.
+  - Standard same-name functions (`Abs`, `Round`, `Floor`, `Sqrt`, `Exp`, `Sin`/`Cos`/`Tan`/`Asin`/`Acos`/`Atan`, `Sign`, `Replace`, `Coalesce`, `Upper`/`Lower` via ExprExtensions) need no registration — default rendering works across databases.
+- `ISqlBuilder` gains `TryAppendSqlLiteral`: string constants (`Expr.Const(string)`) containing only regular characters (no backslash or control characters) are inlined directly as `'value'` (single quotes escaped via `''`); strings with special characters fall back to parameterization. String constants like `Expr.Const(" ")` can now be used in computed column expressions.
+- Added Lambda-to-SQL-function mappings for `System.Text.RegularExpressions.Regex` methods, supporting static form `Regex.M(...)`, instance form `new Regex(pattern).M(...)`, and closure-variable form `regex.M(...)` (instance forms evaluate the Regex object and read `Pattern` via reflection):
+
+  | C# Method/Member | SQL Function | Description |
+  |------------------|--------------|-------------|
+  | `Regex.IsMatch(input, pattern)` | `REGEXP_LIKE` | Regex match predicate (WHERE) |
+  | `Regex.Replace(input, pattern, replacement)` | `REGEXP_REPLACE` | Regex replace |
+  | `Regex.Match(input, pattern).Value` | `REGEXP_SUBSTR` | Extract first match substring |
+  | `Regex.Match(input, pattern).Index` | `REGEXP_INSTR - 1` | First match position (converted to 0-based to match C# `Match.Index`) |
+  | `Regex.Match(input, pattern).Success` | `REGEXP_LIKE` | Whether matched (predicate) |
+
+  - Dialect registration: `REGEXP_LIKE` uses the `REGEXP` operator on MySQL and the `~` operator on PostgreSQL; `REGEXP_REPLACE`/`REGEXP_INSTR`/`REGEXP_SUBSTR`/`REGEXP_COUNT` default to rendering same-name functions (native on Oracle/MySQL 8.0+/PostgreSQL).
+  - `SqlBuilder.DefaultFunctionSqlHandler` renders as `FunctionName(args)`; the `RegisterFunctionSqlHandler(functionName)` name-only overload directly reuses the default rendering.
+- Oracle identifiers are no longer forced to uppercase, consistent with other databases.
+- `EntityService` adds an observer-based entity event interface `IEntityServiceEvent<T>` (plus the convenience base class `EntityServiceEventBase<T>`) that fires `OnXxxing` / `OnXxxed` callbacks before/after insert, update, delete, `UpdateOrInsert`, `DeleteID`, `DeleteAll`, `UpdateAll`, etc.; returning `false` from a `Before` callback cancels the operation. Batch methods (`BatchInsert` / `BatchUpdate` / `BatchDelete`) raise single-entity events per item, supporting per-item filtering.
+- `System.Text.Json.Nodes.JsonNode`-typed properties are now supported out of the box: they auto-map to a `DbValueType.Json` column (stored as a JSON string round-trip) and support JSON-path Lambda mapping via the indexer / `GetValue<T>()` (e.g. `JsonExtract`, `JsonValue` SQL functions).
+- `ServiceInvokeInterceptor` adds three **DI-injected event interfaces** `IServiceInvokingEvent` / `IServiceInvokedEvent` / `IServiceExceptionEvent`, raised before a service method runs, after it returns successfully, and when it throws, respectively; `ServiceInvokeContext` carries raw (unmasked) arguments, duration, and return value. Each can be implemented and registered independently and does not affect the call flow.
+
+### Fixes
+
+- Fixed a bug in custom `SearchAs`/`SearchOneAs` queries where results could not be read correctly when a custom `SelectItem`'s column name differed from the result property name and no alias was given (an `AS` clause is now added automatically).
+- Fixed an error in several call sites that bound the whole entity object as a raw value (`No mapping exists from object type ...`).
+- `SortProperty` now excludes indexer properties, fixing a false circular-dependency error caused by a built-in `Item` (indexer) colliding with a custom `Item` property.
+- `SearchAsAsync` / `SearchOneAsAsync` now include the `CancellationToken` parameter declared by the interface, fixing `EntityViewService<T>` / `RemoteViewServiceAsyncProxy<T>` not implementing the interface members.
+
+---
+
+## v8.1.3 (2026-08-18)
+
+### Breaking Changes
+
+- Unified use of `DbValueType` instead of `DbType` internally; conversion to `System.Data.DbType` only at database operation boundaries. Merged `DbTypeMap` into `DbValueTypeMap`.
+- `IDbConverter.GetDbType(Type)` renamed to `GetDbValueType(Type)`; added `GetDefaultLength(DbValueType)`.
+- `DbValueType.Array` is now a bitmask (value 128), composable with scalar types via bitwise OR (e.g., `DbValueType.Int32 | DbValueType.Array`).
+- `Expr.Cast` / `SqlBuilder.GetSqlTypeName` / `GetDefaultLength` parameters changed to `DbValueType`.
+
+### Improvements
+
+- Computed column supports `ValueTypeExpr` form (`ColumnDefinition.ExpressionExpr`).
+- `DataReaderConverter` infers dialect-specific reader type via the current `SqlBuilder` when `DbValueType.Default`.
+
+---
+
+## v8.1.2 (2026-08-17)
+
+### AOT Compilation Improvements
+
+- **Fixed AutoRegisterGenerator enum/property name mismatch**: corrected `AutoRegisterServiceTypes` to `RegisterPolicy` and named argument `ServiceTypes` to `Policy`.
+- **Removed global trim warning suppression** (`SuppressTrimAnalysisWarnings`); added `DynamicallyAccessedMembers` annotation chains and `UnconditionalSuppressMessage` so trimming/AOT warnings are visible at compile time.
+
+### New Features
+
+- **Computed column supports `ValueTypeExpr` form**: the `ColumnDefinition.ExpressionExpr` property allows setting computed column expressions dynamically using Expr trees such as `Expr.Prop("Price") * Expr.Prop("Quantity")`; rendering is handled by `ExprSqlConverter` to produce SQL, only fixed SQL expressions (property references, constants, functions, arithmetic) that produce no parameters are allowed — a `NotSupportedException` is thrown if the rendered expression produces parameterized values. Takes precedence over the string-form `Expression` when both are set.
+
+---
+
 ## v8.1.1 (2026-08-07)
 
 ### Breaking Changes
-- `[AutoRegister]`'s `ServiceTypes` (previously `Type[]`) is now an enum `AutoRegisterServiceTypes`: `All` (default, implementation type itself + interfaces), `Self` (itself only), `Interface` (interfaces only). Replace the old `[AutoRegister(Lifetime.Scoped, typeof(IFoo))]` syntax with `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`.
+- `[AutoRegister]`'s `ServiceTypes` (previously `Type[]`) is now an enum `RegisterPolicy`: `All` (default, implementation type itself + interfaces), `Self` (itself only), `Interface` (interfaces only). Replace the old `[AutoRegister(Lifetime.Scoped, typeof(IFoo))]` syntax with `[AutoRegister(RegisterPolicy.Interface, Lifetime = Lifetime.Scoped)]`.
 - The `DAOBase` and derived DAO constructors (`ObjectDAO<T>`, `ObjectViewDAO<T>`, `DataDAO<T>`, `DataViewDAO<T>`) now require a `SessionManager` parameter and no longer depend on the static `SessionManager.Current`. When constructing DAOs manually, pass the `SessionManager`; under DI the container resolves it automatically. `SessionManager.Current` is kept solely as an external entry point, and `AddLiteOrm()` binds it to the current scope instance automatically.
 - `ColumnAttribute.DbType` and `ColumnDefinition.DbType` changed from `DbValueType?` to non-nullable `DbValueType`, defaulting to the new `DbValueType.Default` (meaning "not specified, infer from the property type at runtime"). The previous `DbType == null` checks are replaced by `DbType == DbValueType.Default`.
 - `IDbConverter.ConvertToDbValue` parameter changed from `DbType` to `DbValueType` (default `DbValueType.Object`); it no longer accepts a `DbType` argument.
@@ -13,7 +103,7 @@
 ### New Features
 
 - Added `AutoRegisterServices` option to `RegisterLiteOrm()`'s `LiteOrmOptions` (default `true`); set to `false` to skip automatic scan registration (`009d2c3`)
-- `EntityService<T>`, `EntityViewService<T>`, `ObjectDAO<T>`, `ObjectViewDAO<T>`, `DataDAO<T>`, `DataViewDAO<T>` base classes now carry `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`, so derived classes inherit the registration behavior automatically.
+- `EntityService<T>`, `EntityViewService<T>`, `ObjectDAO<T>`, `ObjectViewDAO<T>`, `DataDAO<T>`, `DataViewDAO<T>` base classes now carry `[AutoRegister(RegisterPolicy.All, Lifetime = Lifetime.Scoped)]`, so derived classes inherit the registration behavior automatically.
 - Array type support: collection properties are inferred as `DbValueType.Array`; PostgreSQL emits native array columns (`integer[]`, `text[]`, etc.), other dialects fall back to text-JSON storage.
 - PostgreSQL array functions: parsing and SQL generation for `array_to_string`, `array_append`, `ANY`, etc.; `ANY` binds arrays as a single parameter.
 - New `LiteOrm.Pgsql` namespace with PgSQL-specific `ValueTypeExpr` extensions (`ArrayToString`, `ArrayAppend`, `Any`, `Contains`, `JsonbExtractPath`, `JsonbExtractPathText`, `JsonbContains`, `JsonbBuildObject`, `JsonbBuildArray`).

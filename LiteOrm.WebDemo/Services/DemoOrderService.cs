@@ -17,7 +17,7 @@ public interface IDemoOrderService :
 }
 
 [AutoRegister(Lifetime = Lifetime.Scoped)]
-public class DemoOrderService(ObjectDAO<DemoOrder> dao, ObjectViewDAO<DemoOrderView> viewDao, IMemoryCache _memoryCache) : EntityService<DemoOrder, DemoOrderView>(dao, viewDao), IDemoOrderService
+public class DemoOrderService(IServiceProvider serviceProvider, IMemoryCache _memoryCache) : EntityService<DemoOrder, DemoOrderView>(serviceProvider), IDemoOrderService
 {
     private static readonly TimeSpan CountCacheDuration = TimeSpan.FromSeconds(30);
     private static long _countCacheVersion = 1;

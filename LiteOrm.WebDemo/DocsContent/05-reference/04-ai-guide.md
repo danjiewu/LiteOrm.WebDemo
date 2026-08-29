@@ -98,7 +98,7 @@ builder.Host.RegisterLiteOrm(options =>
 | 非 AOT（默认） | 运行时程序集扫描 | `LiteOrmAutoRegistration.Apply()` 反射扫描引用程序集中带 `[AutoRegister]` 的类型 |
 
 - 两条路径均由 `AutoRegisterServices` 选项（默认 `true`）控制，设为 `false` 时完全跳过自动注册，需手动注册服务。
-- 注册范围由 `[AutoRegister]` 的 `ServiceTypes` 枚举 `AutoRegisterServiceTypes` 控制：`All`（默认，实现类型自身 + 接口）、`Self`（仅自身）、`Interface`（仅接口）。
+- 注册范围由 `[AutoRegister]` 的 `Policy` 枚举 `RegisterPolicy` 控制：`All`（默认，实现类型自身 + 接口）、`Self`（仅自身）、`Interface`（仅接口）。
 - `AddLiteOrm()`：AOT 模式应用生成代码，非 AOT 模式走运行时扫描（由 `RuntimeFeature.IsDynamicCodeSupported` 自动分流）。
 - `RegisterLiteOrm()`：Autofac 程序集扫描注册，并自动应用 `[InterceptAttribute]`、`IEntityService` 系列接口，以及带 `[Service]`（`IsService=true`）特性的类型的 Castle 拦截器（`ServiceInvokeInterceptor`）。
 
@@ -368,20 +368,24 @@ var factory = scope.ServiceProvider.GetRequiredService<ServiceFactory>();
 
 ### Service 异常处理事件
 
+通过注入 `IServiceExceptionEvent` 订阅服务方法异常（通知性质，不影响调用流程）：
+
 ```csharp
-// 全局静态事件，服务方法抛出异常时触发
-ServiceInvokeInterceptor.ExceptionHandling += (sender, context) =>
+public class ExceptionEvent : IServiceExceptionEvent
 {
-    // 读取异常、方法名、参数、SQL 栈等上下文
-    if (context.Exception is TimeoutException)
-        context.Handle(123); // 把异常转成约定结果
-};
+    public void OnException(ServiceExceptionContext context)
+    {
+        // 读取异常、方法名、参数、SQL 栈等上下文
+    }
+}
+
+services.AddScoped<ExceptionEvent>();
+services.AddScoped<IServiceExceptionEvent>(sp => sp.GetRequiredService<ExceptionEvent>());
 ```
 
-- `ServiceInvokeInterceptor.ExceptionHandling` 为全局静态事件
-- `RemoteServiceInvokeInterceptor.ExceptionHandling` 行为一致
-- 不调用 `context.Handle(...)` 时异常继续抛出，适合只做告警/埋点
-- 调用 `context.Handle(result)` 后把异常转成正常返回结果
+- `ServiceInvokeInterceptor` 通过 `IServiceInvokingEvent` / `IServiceInvokedEvent` / `IServiceExceptionEvent` 三个注入式事件接口通知调用生命周期
+- 异常事件为通知性质，异常仍会原样抛出
+- `RemoteServiceInvokeInterceptor.ExceptionHandling` 为远程服务保留的静态事件，可把异常转成约定返回结果
 
 ## 七、特性速查
 

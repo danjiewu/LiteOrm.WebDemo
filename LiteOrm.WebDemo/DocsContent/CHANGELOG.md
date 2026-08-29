@@ -1,9 +1,99 @@
 # 变更日志 (Changelog)
 
+## v8.1.4 (2026-08-24)
+
+### 破坏性变更
+
+- 复杂类型（数组/集合、自定义类）属性**不再自动生成列为表列**，须显式标注 `[Column]`（并按需指定 `DbType = Array`）；已知标量（数值、`string`/`char`、`byte[]`、`Guid`、日期、枚举）及 `Json`/`Jsonb` 映射类型仍自动映射。
+- `EntityService<T>` / `EntityService<T, TView>` / `EntityViewService<T>` 构造函数改为接收 `IServiceProvider`，由容器解析所需的 `ObjectDAO<T>` / `ObjectViewDAO<T>`；派生服务构造函数同步调整，依赖注入场景无需改动。
+- `ServiceInvokeInterceptor` 移除**全局静态事件 `ExceptionHandling`**（及 `context.Handle(...)` 抑制/转结果机制），改为通过依赖注入订阅服务调用事件；异常在通知后仍原样抛出。
+- `EntityService<T>` / `EntityService<T, TView>` 移除 `protected virtual` 的 `*Core` 系列方法（`InsertCore` / `UpdateCore` / `DeleteCore` / `DeleteIDCore` / `UpdateOrInsertCore` 及异步版本），逻辑内联到对应公开方法；重写这些方法的自定义服务需调整。
+
+### 改进
+
+- `ColumnAttribute` / `ForeignColumnAttribute` 均新增 `ConverterType` 用于声明列级转换器；`ForeignColumn` 读取外键投影列时**优先自身声明的转换器，否则回退目标列**。
+- 数值类型互转现已默认注册（覆盖 `decimal`/`float`/`double` 与整型族互转，如 `Decimal→Int32`），跨数值类型读写无需手动注册。
+- 值转换机制优化：转换统一收敛为「委托式转换器」，解析优先级固定为 列级转换器 → 按 (值类型, 数据库取值类型) 的注册表 → 直接赋值；`null`/`DBNull`/空字符串 等空值统一提前短路，未注册或无需转换时不再做通用兜底。
+- 补全各数据库通用 SQL 函数的方言注册，C# 方法名经 `LambdaExprConverter` 转为 `FunctionExpr` 后不再因函数名不匹配或方言差异生成无效 SQL：
+
+  | 函数 | 基类 (SQLite/MySQL/SQLServer) | Oracle | PostgreSQL | SQL Server |
+  |------|------|--------|------------|------------|
+  | `ToLower` | `LOWER` | — | — | — |
+  | `ToUpper` | `UPPER` | — | — | — |
+  | `Pow` | `POWER` | — | — | — |
+  | `Char` | `CHAR` | `CHR` | `CHR` | — |
+  | `Ceiling` | `CEILING` | `CEIL` | `CEIL` | — |
+  | `Truncate` | `TRUNCATE(x,0)` | `TRUNC` | `TRUNC` | `ROUND(x,0,1)` |
+  | `Concat` | `CONCAT` | `||` | — | — |
+  | `Log` | `LOG` | `LN` | `LN` | — |
+  | `Log10` | `LOG10` | `LOG(10,x)` | `LOG` | — |
+  | `Atan2` | `ATAN2` | — | — | `ATN2` |
+  | `Max` (标量) | `GREATEST` | — | — | — |
+  | `Min` (标量) | `LEAST` | — | — | — |
+  | `Max`/`Min` (SQLite) | — | — | — | `max`/`min` |
+
+  - `Max`/`Min` 通过 `IsAggregate` 区分聚合（`MAX`/`MIN`）与标量（`GREATEST`/`LEAST`）；SQLite 的 `max`/`min` 同时支持标量与聚合。
+  - `Abs`、`Round`、`Floor`、`Sqrt`、`Exp`、`Sin`/`Cos`/`Tan`/`Asin`/`Acos`/`Atan`、`Sign`、`Replace`、`Coalesce`、`Upper`/`Lower`（ExprExtensions 形式）等标准 SQL 同名函数无需注册，默认渲染即可跨数据库工作。
+- `ISqlBuilder` 新增 `TryAppendSqlLiteral` 方法：字符串常量（`Expr.Const(string)`）渲染时，仅含常规字符（无反斜杠、控制字符）的字符串以 `'value'` 形式直接内联（单引号以 `''` 转义），含特殊字符的仍走参数化，兼顾安全与性能。计算列表达式中可使用 `Expr.Const(" ")` 等字符串常量。
+- 新增 `System.Text.RegularExpressions.Regex` 方法的 Lambda 到 SQL 函数映射，支持静态形式 `Regex.M(...)`、实例形式 `new Regex(pattern).M(...)`、闭包变量形式 `regex.M(...)`（实例形式通过求值 Regex 对象反射读取 Pattern）：
+
+  | C# 方法/成员 | SQL 函数 | 说明 |
+  |-------------|----------|------|
+  | `Regex.IsMatch(input, pattern)` | `REGEXP_LIKE` | 正则匹配谓词（WHERE） |
+  | `Regex.Replace(input, pattern, replacement)` | `REGEXP_REPLACE` | 正则替换 |
+  | `Regex.Match(input, pattern).Value` | `REGEXP_SUBSTR` | 提取首个匹配子串 |
+  | `Regex.Match(input, pattern).Index` | `REGEXP_INSTR - 1` | 首个匹配位置（转为 0 基以匹配 C# `Match.Index`） |
+  | `Regex.Match(input, pattern).Success` | `REGEXP_LIKE` | 是否匹配（谓词） |
+
+  - 各方言注册：`REGEXP_LIKE` 在 MySQL 使用 `REGEXP` 运算符、PostgreSQL 使用 `~` 运算符；`REGEXP_REPLACE`/`REGEXP_INSTR`/`REGEXP_SUBSTR`/`REGEXP_COUNT` 默认渲染同名函数（Oracle/MySQL 8.0+/PostgreSQL 原生支持）。
+  - `SqlBuilder.DefaultFunctionSqlHandler` 默认处理器按「函数名(参数列表)」渲染，`RegisterFunctionSqlHandler(functionName)` 仅含名称的重载直接复用默认渲染。
+- Oracle 标识符不再强制转大写，与其他数据库行为一致。
+- `EntityService` 新增基于观察者的实体事件接口 `IEntityServiceEvent<T>`（含便捷基类 `EntityServiceEventBase<T>`），在插入、更新、删除、`UpdateOrInsert`、`DeleteID`、`DeleteAll`、`UpdateAll` 等操作前后触发 `OnXxxing` / `OnXxxed` 回调，Before 返回 `false` 可取消操作；批量方法（`BatchInsert` / `BatchUpdate` / `BatchDelete`）逐条触发单条事件，支持逐条剔除。
+- `System.Text.Json.Nodes.JsonNode` 类型属性现已内置支持：自动映射为 `DbValueType.Json` 列（JSON 字符串往返存取），并支持索引器 / `GetValue<T>()` 的 JSON 路径 Lambda 映射（`JsonExtract` / `JsonValue` 等 SQL 函数）。
+- `ServiceInvokeInterceptor` 新增三个**注入式事件接口** `IServiceInvokingEvent` / `IServiceInvokedEvent` / `IServiceExceptionEvent`，分别于服务方法执行前、成功返回后、抛出异常后回调；`ServiceInvokeContext` 携带原始参数（不做掩码）、耗时与返回值。三者可独立实现、通过 DI 注册，且不影响调用流程。
+
+### 修复
+
+- 修正自定义查询 `SearchAs`/`SearchOneAs` 中，当自定义 `SelectItem` 的列名与结果属性名不一致且未显式指定别名时无法正确读取结果的问题（自动补充 `AS` 子句）。
+- 修复部分调用点将实体对象整体当作裸值绑定到驱动导致的 `No mapping exists from object type ...` 错误。
+- `SortProperty` 排除索引器属性，修复内置 `Item`（索引器）与自定义 `Item` 属性重名导致的循环依赖误判。
+- `SearchAsAsync` / `SearchOneAsAsync` 对齐接口补充 `CancellationToken` 参数，修复 `EntityViewService<T>` / `RemoteViewServiceAsyncProxy<T>` 未实现接口成员的问题。
+
+---
+
+## v8.1.3 (2026-08-18)
+
+### 破坏性变更
+
+- 统一使用 `DbValueType` 替代 `DbType`，仅在数据库操作边界转换为 `System.Data.DbType`。合并 `DbTypeMap` 至 `DbValueTypeMap`。
+- `IDbConverter.GetDbType(Type)` 改为 `GetDbValueType(Type)`；新增 `GetDefaultLength(DbValueType)`。
+- `DbValueType.Array` 改为掩码（值 128），可与标量类型按位或组合（如 `DbValueType.Int32 | DbValueType.Array`）。
+- `Expr.Cast` / `SqlBuilder.GetSqlTypeName` / `GetDefaultLength` 参数改为 `DbValueType`。
+
+### 改进
+
+- 计算列支持 `ValueTypeExpr` 形式表达式（`ColumnDefinition.ExpressionExpr`）。
+- `DataReaderConverter` 在 `DbValueType.Default` 时通过当前 `SqlBuilder` 推断方言相关的读取器类型。
+
+---
+
+## v8.1.2 (2026-08-17)
+
+### 优化 AOT 编译
+
+- **修复 AutoRegisterGenerator 枚举/属性名错位**：生成器将 `AutoRegisterServiceTypes` 改为 `RegisterPolicy`，命名参数 `ServiceTypes` 改为 `Policy`。
+- **移除全局裁剪告警抑制**（`SuppressTrimAnalysisWarnings`），添加 `DynamicallyAccessedMembers` 注解链与 `UnconditionalSuppressMessage`，使裁剪/AOT 告警在编译期可见。
+
+### 新特性
+
+- **计算列支持 `ValueTypeExpr` 形式表达式**：`ColumnDefinition.ExpressionExpr` 属性允许使用 `Expr.Prop("Price") * Expr.Prop("Quantity")` 等 Expr 树动态设置计算列表达式；渲染时通过 `ExprSqlConverter` 转为 SQL，仅允许不生成参数的固定 SQL（属性引用、常量、函数、算术运算），产生参数时抛 `NotSupportedException`。与字符串形式 `Expression` 同时设置时优先使用 Expr 树形式。
+
+---
+
 ## v8.1.1 (2026-08-07)
 
 ### 破坏性变更
-- `[AutoRegister]` 的 `ServiceTypes`（此前为 `Type[]`）已改为枚举 `AutoRegisterServiceTypes`：`All`（默认，实现类型自身 + 接口）、`Self`（仅自身）、`Interface`（仅接口）。原 `[AutoRegister(Lifetime.Scoped, typeof(IFoo))]` 写法请改为 `[AutoRegister(AutoRegisterServiceTypes.Interface, Lifetime = Lifetime.Scoped)]`。
+- `[AutoRegister]` 的 `ServiceTypes`（此前为 `Type[]`）已改为枚举 `RegisterPolicy`：`All`（默认，实现类型自身 + 接口）、`Self`（仅自身）、`Interface`（仅接口）。原 `[AutoRegister(Lifetime.Scoped, typeof(IFoo))]` 写法请改为 `[AutoRegister(RegisterPolicy.Interface, Lifetime = Lifetime.Scoped)]`。
 - `DAOBase` 及派生 DAO（`ObjectDAO<T>`、`ObjectViewDAO<T>`、`DataDAO<T>`、`DataViewDAO<T>`）构造函数需传入 `SessionManager`，不再依赖静态 `SessionManager.Current`。手动构造 DAO 时请传入 `sessionManager`；依赖注入场景由容器自动解析。`SessionManager.Current` 仅保留为外部使用入口，`AddLiteOrm()` 会自动将其绑定到当前作用域实例。
 - `ColumnAttribute.DbType` 与 `ColumnDefinition.DbType` 由 `DbValueType?` 改为非空 `DbValueType`，默认值为新增的 `DbValueType.Default`（表示未显式指定、运行时按属性类型推断）。原 `DbType == null` 判空逻辑改为 `DbType == DbValueType.Default`。
 - `IDbConverter.ConvertToDbValue` 的参数由 `DbType` 改为 `DbValueType`（默认 `DbValueType.Object`），不再接受 `DbType` 参数。
@@ -13,7 +103,7 @@
 ### 新特性
 
 - `RegisterLiteOrm()` 的 `LiteOrmOptions` 新增 `AutoRegisterServices` 选项（默认 `true`），设为 `false` 可跳过自动扫描注册 (`009d2c3`)
-- `EntityService<T>`、`EntityViewService<T>`、`ObjectDAO<T>`、`ObjectViewDAO<T>`、`DataDAO<T>`、`DataViewDAO<T>` 基类新增 `[AutoRegister(AutoRegisterServiceTypes.All, Lifetime = Lifetime.Scoped)]`，派生类自动继承注册行为。
+- `EntityService<T>`、`EntityViewService<T>`、`ObjectDAO<T>`、`ObjectViewDAO<T>`、`DataDAO<T>`、`DataViewDAO<T>` 基类新增 `[AutoRegister(RegisterPolicy.All, Lifetime = Lifetime.Scoped)]`，派生类自动继承注册行为。
 - 数组类型支持：集合属性自动推断为 `DbValueType.Array`；PostgreSQL 生成原生数组列（`integer[]`、`text[]` 等），其余方言回退文本 JSON 存储。
 - PostgreSQL 数组函数：新增 `array_to_string`、`array_append`、`ANY` 等函数的解析与 SQL 生成，`ANY` 支持数组作为单参数绑定。
 - 新增 `LiteOrm.Pgsql` 命名空间，提供 `ValueTypeExpr` 的 PgSQL 专用扩展（`ArrayToString`、`ArrayAppend`、`Any`、`Contains`、`JsonbExtractPath`、`JsonbExtractPathText`、`JsonbContains`、`JsonbBuildObject`、`JsonbBuildArray`）。
