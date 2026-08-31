@@ -48,7 +48,7 @@ public static class DbInitializer
         if (orderCount == 0)
         {
             var now = DateTime.UtcNow;
-            var statuses = DemoOrderStatuses.All;
+            var statuses = Enum.GetValues<DemoOrderStatuses>();
             var customerPool = new[] { "Contoso", "Fabrikam", "Northwind", "Adventure Works", "Woodgrove" };
             var productPool = new[] { "Laptop", "Monitor", "Keyboard", "Dock", "Chair", "Camera" };
             var notes = new[] { "priority", "demo customer", "follow-up", "standard", "expedite", "bulk order" };

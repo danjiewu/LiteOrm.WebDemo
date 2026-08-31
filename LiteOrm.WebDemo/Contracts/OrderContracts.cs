@@ -64,7 +64,7 @@ public sealed record OrderDto(
     int Quantity,
     decimal UnitPrice,
     decimal TotalAmount,
-    string Status,
+    DemoOrderStatuses Status,
     string? Note,
     DateTime CreatedTime,
     DateTime UpdatedTime,
