@@ -95,12 +95,12 @@ dotnet add package LiteOrm.Remote
 ```csharp
 using LiteOrm.Remote;
 
-var host = Host.CreateDefaultBuilder(args)
-    .RegisterLiteOrmRemote(opts =>
-    {
-        opts.RemoteServiceUri = new Uri("http://localhost:5000");
-    })
-    .Build();
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddLiteOrmRemote(opts =>
+{
+    opts.RemoteServiceUri = new Uri("http://localhost:5000");
+});
+var host = builder.Build();
 ```
 
 ### 2.4 Calling — Identical to Local Services
@@ -207,14 +207,37 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 |----------|------|---------|-------------|
 | `InvokePath` | `string` | `"api/remote/invoke"` | Remote invocation HTTP endpoint path |
 | `SignInPath` | `string` | `"api/remote/signin"` | HTTP endpoint path for signing in (issuing identity tickets) |
-| `EnableAuthentication` | `bool` | `true` | Enables Cookie authentication. When enabled, the SignIn endpoint creates an identity ticket via `HttpContext.SignInAsync`; the Invoke endpoint restores user context via `HttpContext.User` |
+| `EnableAuthentication` | `bool` | `false` | Enables Cookie authentication. Must be turned on in the `AddRemoteServer` `configure` callback; the framework registers the Cookie authentication scheme at registration time based on it |
 | `JsonSerializerOptions` | `JsonSerializerOptions` | `UnsafeRelaxedJsonEscaping` + case-insensitive | JSON serialization options |
-| `ServiceTypeResolver` | `IRemoteServiceTypeResolver` | `DefaultServiceTypeResolver` | Service type resolver instance |
-| `ServiceTypeResolverFactory` | `Func<IServiceProvider, IRemoteServiceTypeResolver>?` | `null` | Resolver factory, takes precedence over `ServiceTypeResolver` |
+| `ServiceTypeResolver` | `ITypeNameResolver` | `DefaultServiceTypeResolver.Instance` | Service type resolver instance |
+| `TypeNameResolverFactory` | `Func<IServiceProvider, ITypeNameResolver>?` | `null` | Type name resolver factory, takes precedence over `ServiceTypeResolver`; allows injecting DI services into the resolver |
+| `LogJsonPayloads` | `bool` | `false` | Whether to log request/response JSON payloads received by the server (Debug level; requires enabling low-level filtering on the corresponding logging provider) |
 | `AutoRegisterEntityServices` | `bool` | `true` | Auto-scan interfaces with `[Service]` attribute |
 | `Assemblies` | `Assembly[]?` | `null` | Scan assembly list; scans all referenced assemblies if not set |
 
-### 4.2 Client Configuration (`LiteOrmOptions`)
+#### Read configuration via the `AddRemoteServer(configure)` callback
+
+Server options are configured through the `configure` callback of `AddRemoteServer()` (switches such as `EnableAuthentication` take effect here). Combine it with `IConfiguration` to read a configuration section; properties not present keep their defaults:
+
+```csharp
+var serverSection = builder.Configuration.GetSection("LiteOrm:RemoteServer");
+
+builder.Services.AddRemoteServer(options =>
+{
+    options.InvokePath = serverSection["InvokePath"] ?? options.InvokePath;
+    options.SignInPath = serverSection["SignInPath"] ?? options.SignInPath;
+    options.EnableAuthentication = serverSection.GetValue("EnableAuthentication", options.EnableAuthentication);
+    options.LogJsonPayloads = serverSection.GetValue("LogJsonPayloads", options.LogJsonPayloads);
+    options.AutoRegisterEntityServices = serverSection.GetValue("AutoRegisterEntityServices", options.AutoRegisterEntityServices);
+
+    // Interface/delegate properties cannot be built from configuration; assign them manually here if needed
+    // options.TypeNameResolverFactory = sp => ...;
+});
+```
+
+> **Note**: `EnableAuthentication` registers the Cookie authentication scheme at `AddRemoteServer` registration time (when enabled), so it must be set in the `configure` callback — there is no other deferred injection path.
+
+### 4.2 Client Configuration (`LiteOrmRemoteOptions`)
 
 | Property | Type | Description |
 |----------|------|-------------|
@@ -224,12 +247,37 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 | `CredentialsResolver` | `ICredentialsResolver?` | Credentials resolver instance. On each `InvokeAsync`, the resolver provides an identity ticket written to the HTTP request header; `null` means anonymous connection |
 | `CredentialsResolverFactory` | `Func<IServiceProvider, ICredentialsResolver>?` | Credentials resolver factory. Receives `IServiceProvider`, returns `ICredentialsResolver` instance. Takes precedence over `CredentialsResolver`, allowing DI service injection in the resolver |
 | `ConfigureHttpClient` | `Action<HttpClient>?` | Configure the internal `HttpClient` (timeout, default headers, etc.) |
-| `Transport` | `IRemoteServiceTransport?` | Custom transport layer instance. Takes precedence over `RemoteServiceUri`; if `TransportFactory` is also set, the factory takes precedence |
-| `TransportFactory` | `Func<IServiceProvider, IRemoteServiceTransport>?` | Custom transport layer factory. Receives `IServiceProvider`, returns `IRemoteServiceTransport` instance. Takes precedence over `Transport`, allowing DI service injection in the transport layer (e.g. `ICredentialsResolver`) |
+| `Transport` | `IRemoteServiceTransport?` | Custom transport layer instance. Takes precedence over `RemoteServiceUri` |
+| `LogJsonPayloads` | `bool` | Whether to log request/response JSON payloads of remote calls (Debug level; requires enabling low-level filtering on the corresponding logging provider), default `false` |
 | `AutoRegisterEntityServices` | `bool` | Whether to auto-register all entity services as remote proxies, default `true` |
 | `Assemblies` | `Assembly[]?` | Custom interface scan assembly list; scans all referenced assemblies if not set |
 
-> **Required**: At least one of `Transport`, `TransportFactory`, or `RemoteServiceUri` must be set, otherwise `InvalidOperationException` is thrown during registration.
+> **Required**: At least one of `Transport` or `RemoteServiceUri` must be set, otherwise `InvalidOperationException` is thrown when resolving `IRemoteServiceTransport`.
+
+#### Read configuration via the `AddLiteOrmRemote(Factory overload)`
+
+`AddLiteOrmRemote` provides a factory overload that registers `LiteOrmRemoteOptions`: the factory receives `IServiceProvider`, from which dependencies such as `IConfiguration` can be resolved. At runtime the factory-built options take precedence (over the `configure`-callback overload). Use `.Get<T>()` to bind the whole options from the `LiteOrm:Remote` section; delegate properties must be assigned manually because they cannot be read from configuration:
+
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddLiteOrmRemote(sp =>
+{
+    var config = sp.GetRequiredService<IConfiguration>();
+    var options = config.GetSection("LiteOrm:Remote").Get<LiteOrmRemoteOptions>() ?? new LiteOrmRemoteOptions();
+
+    // Ensure the required URI exists
+    if (options.RemoteServiceUri == null)
+        throw new InvalidOperationException("LiteOrm:Remote:RemoteServiceUri is required in configuration.");
+
+    // Hard-coded delegates cannot be read from configuration; assign them manually
+    options.ConfigureHttpClient = client => client.Timeout = TimeSpan.FromSeconds(30);
+
+    return options;
+});
+var host = builder.Build();
+```
+
+> **Note**: `.Get<T>()` only binds string/value-type properties convertible from configuration; interface/delegate properties such as `CredentialsResolver`, `CredentialsResolverFactory`, `Transport`, and `ConfigureHttpClient` cannot be built from configuration (.NET 8+ skips binding them) and must be assigned manually after binding. Using `.Get<T>()` requires the `Microsoft.Extensions.Configuration.Binder` package.
 
 #### HTTP client tuning example
 
@@ -465,33 +513,34 @@ public class JwtAuthHandler : IRemoteAuthenticationHandler
 **Client configuration (JWT written to the `Authorization` header):**
 
 ```csharp
-var host = Host.CreateDefaultBuilder(args)
-    .RegisterLiteOrmRemote(opts =>
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddLiteOrmRemote(sp =>
+{
+    var opts = new LiteOrmRemoteOptions
     {
-        opts.RemoteServiceUri = new Uri("http://localhost:5000");
+        RemoteServiceUri = new Uri("http://localhost:5000"),
+    };
 
-        // Register StaticCredentialsResolver via CredentialsResolverFactory
-        opts.CredentialsResolverFactory = sp =>
-        {
-            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
-            opts.ConfigureHttpClient?.Invoke(httpClient);
-            return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
-        };
+    // Register StaticCredentialsResolver via CredentialsResolverFactory
+    opts.CredentialsResolverFactory = sp2 =>
+    {
+        var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+        opts.ConfigureHttpClient?.Invoke(httpClient);
+        return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
+    };
 
-        // Use TransportFactory to build the transport layer, resolving ICredentialsResolver from DI
-        opts.TransportFactory = sp =>
-        {
-            var resolver = sp.GetRequiredService<ICredentialsResolver>();
-            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
-            opts.ConfigureHttpClient?.Invoke(httpClient);
-            return new HttpRemoteServiceTransport(httpClient, resolver)
-            {
-                TicketHeaderName = "Authorization",  // default Cookie; switch to Authorization for JWT
-                TicketFormat = "Bearer {0}",         // produces "Bearer <token>"
-            };
-        };
-    })
-    .Build();
+    // Inject the transport layer via Transport, resolving ICredentialsResolver from DI (provided by the factory above)
+    var resolver = sp.GetRequiredService<ICredentialsResolver>();
+    var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+    opts.ConfigureHttpClient?.Invoke(httpClient);
+    opts.Transport = new HttpRemoteServiceTransport(httpClient, resolver)
+    {
+        TicketHeaderName = "Authorization",  // default Cookie; switch to Authorization for JWT
+        TicketFormat = "Bearer {0}",         // produces "Bearer <token>"
+    };
+    return opts;
+});
+var host = builder.Build();
 
 // Log in once at startup to obtain the JWT token
 using var scope = host.Services.CreateScope();
@@ -533,25 +582,25 @@ public interface ICredentialsResolver
 
 The framework provides `StaticCredentialsResolver` for single-user scenarios (background services, desktop clients): `LoginAsync` posts credentials to the server SignIn endpoint, the returned ticket is saved locally, and `GetTicketAsync` returns the cached ticket.
 
-#### Registering via `LiteOrmOptions`
+#### Registering via `LiteOrmRemoteOptions`
 
 Register `StaticCredentialsResolver` via the `CredentialsResolverFactory` so the DI container manages its lifetime, and the transport layer can resolve it via the `ICredentialsResolver` interface:
 
 ```csharp
-var host = Host.CreateDefaultBuilder(args)
-    .RegisterLiteOrmRemote(opts =>
-    {
-        opts.RemoteServiceUri = new Uri("http://localhost:5000");
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddLiteOrmRemote(opts =>
+{
+    opts.RemoteServiceUri = new Uri("http://localhost:5000");
 
-        // Register StaticCredentialsResolver via the factory
-        opts.CredentialsResolverFactory = sp =>
-        {
-            var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
-            opts.ConfigureHttpClient?.Invoke(httpClient);
-            return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
-        };
-    })
-    .Build();
+    // Register StaticCredentialsResolver via the factory
+    opts.CredentialsResolverFactory = sp =>
+    {
+        var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+        opts.ConfigureHttpClient?.Invoke(httpClient);
+        return new StaticCredentialsResolver(httpClient, opts.RemoteSignInPath);
+    };
+});
+var host = builder.Build();
 
 // Log in once at startup (resolve the resolver instance from the DI container)
 using (var scope = host.Services.CreateScope())
@@ -590,27 +639,30 @@ graph LR
 ```csharp
 builder.Services.AddHttpContextAccessor(); // required
 
-builder.Host.RegisterLiteOrmRemote(opts =>
+builder.Host.ConfigureServices((_, services) => services.AddLiteOrmRemote(sp =>
 {
-    opts.RemoteServiceUri = new Uri("http://localhost:5000");
-    opts.CredentialsResolverFactory = sp =>
+    var opts = new LiteOrmRemoteOptions
     {
-        var httpCtxAccessor = sp.GetRequiredService<IHttpContextAccessor>();
+        RemoteServiceUri = new Uri("http://localhost:5000"),
+    };
+
+    opts.CredentialsResolverFactory = sp2 =>
+    {
+        var httpCtxAccessor = sp2.GetRequiredService<IHttpContextAccessor>();
         return new HttpContextTicketResolver(httpCtxAccessor);
     };
-    // Use TransportFactory to build the transport layer with DI injection and configure the ticket header
-    opts.TransportFactory = sp =>
+
+    // Inject the transport layer via Transport with DI injection and configure the ticket header
+    var resolver = sp.GetRequiredService<ICredentialsResolver>();
+    var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
+    opts.ConfigureHttpClient?.Invoke(httpClient);
+    opts.Transport = new HttpRemoteServiceTransport(httpClient, resolver)
     {
-        var resolver = sp.GetRequiredService<ICredentialsResolver>();
-        var httpClient = new HttpClient { BaseAddress = opts.RemoteServiceUri };
-        opts.ConfigureHttpClient?.Invoke(httpClient);
-        return new HttpRemoteServiceTransport(httpClient, resolver)
-        {
-            TicketHeaderName = "Cookie",   // forward browser cookie to the remote service
-            TicketFormat = "{0}",
-        };
+        TicketHeaderName = "Cookie",   // forward browser cookie to the remote service
+        TicketFormat = "{0}",
     };
-});
+    return opts;
+}));
 
 // Custom ICredentialsResolver: reads the current user's ticket from HttpContext
 public class HttpContextTicketResolver : ICredentialsResolver
@@ -734,19 +786,19 @@ The server finds the corresponding `Type` based on `ServiceName` in the request,
 
 > **Generic type names**: Generic types should use the CLR name format `Foo`1` (with backtick arity suffix), to avoid conflicts with non-generic types of the same name.
 
-### 6.2 `IRemoteServiceTypeResolver` — Server Type Resolver
+### 6.2 `ITypeNameResolver` — Server Type Resolver
 
-The server uses `IRemoteServiceTypeResolver` to resolve the `ServiceName` (short type name) in the request to the actual service interface type.
+The server uses `ITypeNameResolver` to resolve the `ServiceName` (short type name) in the request to the actual service interface type.
 
 | Implementation | Behavior |
 |---------------|----------|
 | `DefaultServiceTypeResolver` | Default implementation. Scans all assemblies by short type name when no namespace is specified; when `ServiceNamespace`/`ModelNamespace` is specified, prefers exact match by `Namespace.TypeName`, falling back to full assembly short-name scan on failure |
-| `DelegateRemoteServiceTypeResolver` | Custom resolution logic via delegate |
-| Custom `IRemoteServiceTypeResolver` | Full control over the resolution process |
+| `DelegateTypeNameResolver` | Custom resolution logic via delegate |
+| Custom `ITypeNameResolver` | Full control over the resolution process |
 
 ```csharp
 // Default: scan all assemblies by short type name
-options.ServiceTypeResolver = new DefaultServiceTypeResolver();
+options.ServiceTypeResolver = DefaultServiceTypeResolver.Instance;
 
 // Specify namespaces for faster exact matching and to avoid name conflicts
 options.ServiceTypeResolver = new DefaultServiceTypeResolver(
@@ -756,7 +808,7 @@ options.ServiceTypeResolver = new DefaultServiceTypeResolver(
 // Or use a factory (can inject other DI services)
 builder.Services.AddRemoteServer(options =>
 {
-    options.ServiceTypeResolverFactory = sp =>
+    options.TypeNameResolverFactory = sp =>
         new DefaultServiceTypeResolver("MyApp.Services", "MyApp.Models");
 });
 ```
@@ -788,7 +840,7 @@ foreach (var o in orders)
     Console.WriteLine($"OrderNo={o.OrderNo}, Id={o.Id}");  // Each Id has been written back
 ```
 
-> **Dependency**: `IdentityOutAttribute` resolves the Identity column through `TableInfoProvider.Default`. Both client and server must register it (`LiteOrm` main library's `LiteOrmCoreInitializer` initializes it automatically).
+> **Dependency**: `IdentityOutAttribute` resolves the Identity column through `TableInfoProvider.Instance`. Both client and server must register it (`LiteOrm` main library's `LiteOrmCoreInitializer` initializes it automatically).
 
 ### 7.2 `[CopyableOut]` — Full Object Write-back
 
@@ -823,7 +875,7 @@ public interface ICopyableUserService
 | `Single` (default) | Single parameter write-back | The type of the write-back value |
 | `Collection` | Iterates `IEnumerable`/`IList`, calling handler per item | Write-back value type for **each element** (framework automatically wraps as `List<ReturnType>` for serialization) |
 
-### 6.4 Custom Write-back Handler
+### 7.4 Custom Write-back Handler
 
 Implement the `IArgumentOutHandler` interface (in the `LiteOrm.Common` namespace), and mark the parameter with `[ArgumentOut(typeof(YourHandler), typeof(ReturnType))]`:
 
@@ -989,7 +1041,7 @@ For the JSON structure of requests and responses, see [Expression Serialization]
 
 1. **`ForEachAsync` is not supported for remote calls**: Streaming iteration requires continuous data return, which the remote protocol does not support; throws `NotSupportedException`
 2. **`CancellationToken` transparent passing**: The cancellation token is not serialized; it is passed end-to-end by the transport layer
-3. **Client and server must register the same `TableInfoProvider.Default`**: `IdentityOutAttribute` resolves the Identity column through `TableInfoProvider.Default`, with no reflection fallback
+3. **Client and server must register the same `TableInfoProvider.Instance`**: `IdentityOutAttribute` resolves the Identity column through `TableInfoProvider.Instance`, with no reflection fallback
 4. **`ServiceName` consistency**: When both ends enable `AutoRegisterEntityServices`, the framework ensures consistency automatically; when manually registering custom names, both ends must call `TypeResolverHelper.Register`
 5. **Generic service interfaces**: `DefaultServiceTypeResolver` uses the CLR name format `Foo`1` to look up open generics, avoiding conflicts with non-generic types of the same name
 6. **Base interface method inheritance**: Methods declared in the service type and all its base interfaces can be invoked; throws `AmbiguousMatchException` on duplicate method keys
@@ -999,7 +1051,7 @@ For the JSON structure of requests and responses, see [Expression Serialization]
 
 | Dimension | Local Service | Remote Service |
 |-----------|---------------|----------------|
-| Registration | `RegisterLiteOrm` auto-scans `[Service]` | `RegisterLiteOrmRemote` + proxy registration |
+| Registration | `RegisterLiteOrm` auto-scans `[Service]` | `AddLiteOrmRemote` + proxy registration |
 | Invocation | Direct reflection call | Dynamic proxy interception + HTTP forwarding |
 | Transactions | `[Transaction]` AOP | Cross-process transactions not supported (see [Transactions Guide](../06-di/01-transactions.en.md)) |
 | `ForEachAsync` | Streaming iteration | Throws `NotSupportedException` |
@@ -1018,13 +1070,13 @@ For the JSON structure of requests and responses, see [Expression Serialization]
 | **Flexible transport layer** | Built-in HTTP transport; quickly implement named pipe, gRPC, and other custom transports by inheriting `JsonRemoteServiceTransport` |
 | **Smart type resolution** | `$type` wrapping strategy automatically handles parameter type polymorphism; `TypeResolverHelper` supports custom service name registration |
 | **Auto-registration** | `AutoRegisterEntityServices` enabled by default; scans `[Service]` attribute to automatically complete name mapping and proxy registration |
-| **Progressive evolution** | Smoothly evolve from a monolithic app (`RegisterLiteOrm`) to frontend-backend separation (`RegisterLiteOrmRemote`) without changing service interface definitions |
+| **Progressive evolution** | Smoothly evolve from a monolithic app (`RegisterLiteOrm`) to frontend-backend separation (`AddLiteOrmRemote`) without changing service interface definitions |
 
 ---
 
 ## Related Links
 
-- [Configuration Reference](../05-reference/01-configuration-reference.en.md) — Full documentation for `RegisterLiteOrm` / `RegisterLiteOrmRemote`
+- [Configuration Reference](../05-reference/01-configuration-reference.en.md) — Full documentation for `RegisterLiteOrm` / `AddLiteOrmRemote`
 - [Expression Guide](../02-core-usage/06-expr-guide.en.md) — Lambda condition queries, also applicable to remote calls
 - [Expression Serialization](../04-extensibility/04-expr-serialization.en.md) — Serialization mechanism for `Expr` expression trees
 - [RemoteServiceDemo.cs](https://github.com/danjiewu/LiteOrm/tree/master/LiteOrm.Demo/Demos/RemoteServiceDemo.cs) — 13 typical client operation scenarios
