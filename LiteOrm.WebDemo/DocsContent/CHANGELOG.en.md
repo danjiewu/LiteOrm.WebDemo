@@ -1,5 +1,37 @@
 # Changelog
 
+## v8.1.7 (2026-09-10)
+
+### Fixes
+
+- **Fixed built-in generic services not being registered under AOT** (`LiteOrm`): `AddLiteOrm()` previously registered the generic DAOs and services (`ObjectDAO<>` / `ObjectViewDAO<>` / `EntityService<>` / `EntityViewService<>` and their interfaces) only when `AutoRegisterServices` was `false`. That branch never applies in AOT builds, so `GetRequiredService<IEntityService<T>>()` threw "No service for type ... has been registered". They are now registered unconditionally, and `AutoRegisterServices` only governs auto-registration of user-defined services and DAOs.
+
+***
+
+## v8.1.6 (2026-09-10)
+
+### Breaking Changes
+
+- **`DisableLiteOrmCodeGenAttribute` renamed to `LiteOrmCodeGenAttribute`** (`LiteOrm.Common`):  only the configured kind flags are generated, independent of AOT build properties; when not declared, generators fall back to auto-detecting from AOT build settings (full generation when AOT is on). Assemblies that used the old attribute name must switch to `[assembly: LiteOrmCodeGen(...)]`.
+
+- **`DefaultServiceTypeResolver` renamed to `DefaultTypeResolver`** (`LiteOrm.Common`): `ServiceNamespace`/`ModelNamespace` were merged into a single `Namespaces` list, and type names are resolved by trying each namespace in order (`Namespace.TypeName`); generic service names and their type arguments share the same list. When no namespace is given the resolver falls back to a full-assembly short-name scan. Code that used the old class name or old properties must be migrated.
+
+### Enhancements
+
+- **Granular code-generation control**: `LiteOrmCodeGenAttribute` can selectively enable `TableInfo` / `DataReaderMappers` / `PropertyAccessors` / `AotTypeRegistration` / `AutoRegister`; declaring it generates exactly what is specified, otherwise AOT auto-detection applies.
+- **Optimized generic service-type resolution on the remote server** (`LiteOrm.Remote.Server`): the generic services `IEntityService<T>`, `IEntityViewService<T>`, `IEntityServiceAsync<T>`, and `IEntityViewServiceAsync<T>` are registered by default, and the name suffix is auto-detected (e.g. `IEntityService` matches the generic form `` `IEntityService`1` ``).
+- **The `LiteOrm` package no longer bundles the source generator**: the analyzer is now provided solely by `LiteOrm.Common`, so referencing both packages no longer loads the same analyzer twice and no longer produces duplicate generated definitions (`CS0101` / `CS0111`).
+- **AOT type registration now uses a dedicated generation pipeline**: generation of `LiteOrmAotTypeRegistration` was split from entity-metadata generation and runs on its own compilation pipeline, emitting exactly one copy per compilation unit instead of duplicate same-named types from multiple generation paths.
+- **Remote proxy registration switched to singleton** (`LiteOrm.Remote`): the proxy implementations of `IEntityService<T>` / `IEntityServiceAsync<T>` / `IEntityViewService<T>` / `IEntityViewServiceAsync<T>` changed from `Scoped` to `Singleton`.
+
+### Fixes
+
+- **Fixed factory overloads not registering core services**: `AddLiteOrm(Func<IServiceProvider, LiteOrmOptions>)`, `RegisterLiteOrm(Func<IServiceProvider, LiteOrmOptions>)`, and `AddLiteOrmRemote(Func<IServiceProvider, LiteOrmRemoteOptions>)` previously registered only the options factory and returned immediately, skipping core-service registration and leaving the container without the core services; the factory overloads now complete core registration after registering the factory.
+
+- **Fixed mismatches between the column type and the actual value in `GetObject` / `GetObjects` and similar paths**: `ColumnDefinition.ToDbValue` gained an `IDbConverter` parameter — when a raw value (e.g. a key in `GetObject`, a timestamp in `Update`) does not match the column-level converter's value type, a write converter is resolved from the registry by (value type, column `DbValueType`) before binding instead of passing the raw value straight to the driver.
+
+***
+
 ## v8.1.5 (2026-09-02)
 
 ### Breaking Changes

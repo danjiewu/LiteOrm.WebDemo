@@ -1,5 +1,37 @@
 # 变更日志 (Changelog)
 
+## v8.1.7 (2026-09-10)
+
+### 修复
+
+- **修复 AOT 下框架内置泛型服务未注册的问题**（`LiteOrm`）：`AddLiteOrm()` 此前只在 `AutoRegisterServices` 为 `false` 时才注册泛型 DAO 与服务（`ObjectDAO<>` / `ObjectViewDAO<>` / `EntityService<>` / `EntityViewService<>` 及其接口），AOT 构建下该分支不成立，`GetRequiredService<IEntityService<T>>()` 会抛 "No service for type ... has been registered"。现改为固定注册，`AutoRegisterServices` 只控制用户自定义服务与 DAO 的自动注册。
+
+***
+
+## v8.1.6 (2026-09-10)
+
+### 破坏性变更
+
+- **`DisableLiteOrmCodeGenAttribute` 重命名为 `LiteOrmCodeGenAttribute`**（`LiteOrm.Common`）：仅生成指定的内容，不再依赖 AOT 构建属性自动判定；未声明时仍由源生成器按 AOT 开启状态自动全量生成。使用旧特性名的程序集需改用 `[assembly: LiteOrmCodeGen(...)]`。
+
+- **`DefaultServiceTypeResolver` 重命名为 `DefaultTypeResolver`**（`LiteOrm.Common`）：`ServiceNamespace`/`ModelNamespace` 合并为 `Namespaces` 命名空间列表，类型名解析时按列表顺序依次以 `命名空间.类型名` 匹配（泛型服务名与类型参数共用该列表）；未指定命名空间时回退全程序集短名扫描。使用旧类名或旧属性的代码需迁移。
+
+### 改进
+
+- **源生成器细粒度代码生成控制**：`LiteOrmCodeGenAttribute` 支持分别控制 `TableInfo` / `DataReaderMappers` / `PropertyAccessors` / `AotTypeRegistration` / `AutoRegister` 的生成，声明即按定义生成，未声明按 AOT 自动判定。
+- **优化 Remote 服务端泛型服务类型解析**（`LiteOrm.Remote.Server`）：默认注册`IEntityService<T>`、`IEntityViewService<T>`、`IEntityServiceAsync<T>`、`IEntityViewServiceAsync<T>`泛型服务，自动检测名称后缀（如 `IEntityService` 泛型检测 `` `IEntityService`1 ``）。
+- **`LiteOrm` 包不再内置源生成器**：分析器统一由 `LiteOrm.Common` 提供，避免工程同时引用两个包时同源分析器被加载两次、生成代码重复定义（`CS0101` / `CS0111`）。
+- **AOT 类型注册改为独立生成管道**：`LiteOrmAotTypeRegistration` 的生成与实体元数据生成拆分，由独立的编译管道输出，每个编译单元恰好一份，不再因多条生成路径重复产出同名类型。
+- **远程代理注册改为单例**（`LiteOrm.Remote`）：`IEntityService<T>` / `IEntityServiceAsync<T>` / `IEntityViewService<T>` / `IEntityViewServiceAsync<T>` 的代理实现由 `Scoped` 改为 `Singleton`。
+
+### 修复
+
+- **修复工厂重载未注册核心服务**：`AddLiteOrm(Func<IServiceProvider, LiteOrmOptions>)` / `RegisterLiteOrm(Func<IServiceProvider, LiteOrmOptions>)` / `AddLiteOrmRemote(Func<IServiceProvider, LiteOrmRemoteOptions>)` 此前只注册选项工厂便直接返回，遗漏核心服务注册，导致容器中缺少核心服务；现于注册工厂后继续完成核心注册。
+
+- **修正 `GetObject` / `GetObjects` 等场景下列类型与实际值不一致的错误**：`ColumnDefinition.ToDbValue` 新增 `IDbConverter` 参数，键值、时间戳等裸值传入时，若与列级转换器的值类型不一致，改为按「(值类型, 列 `DbValueType`)」从转换器注册表解析写转换器再绑定，不再直接把原值传给驱动。
+
+***
+
 ## v8.1.5 (2026-09-02)
 
 ### 破坏性变更

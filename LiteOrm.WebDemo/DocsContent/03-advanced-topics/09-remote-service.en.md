@@ -209,7 +209,7 @@ int deleted = await userService.DeleteAsync(u => u.UserName == "alice");
 | `SignInPath` | `string` | `"api/remote/signin"` | HTTP endpoint path for signing in (issuing identity tickets) |
 | `EnableAuthentication` | `bool` | `false` | Enables Cookie authentication. Must be turned on in the `AddRemoteServer` `configure` callback; the framework registers the Cookie authentication scheme at registration time based on it |
 | `JsonSerializerOptions` | `JsonSerializerOptions` | `UnsafeRelaxedJsonEscaping` + case-insensitive | JSON serialization options |
-| `ServiceTypeResolver` | `ITypeNameResolver` | `DefaultServiceTypeResolver.Instance` | Service type resolver instance |
+| `ServiceTypeResolver` | `ITypeNameResolver` | `DefaultTypeResolver.Instance` | Service type resolver instance |
 | `TypeNameResolverFactory` | `Func<IServiceProvider, ITypeNameResolver>?` | `null` | Type name resolver factory, takes precedence over `ServiceTypeResolver`; allows injecting DI services into the resolver |
 | `LogJsonPayloads` | `bool` | `false` | Whether to log request/response JSON payloads received by the server (Debug level; requires enabling low-level filtering on the corresponding logging provider) |
 | `AutoRegisterEntityServices` | `bool` | `true` | Auto-scan interfaces with `[Service]` attribute |
@@ -319,11 +319,11 @@ services.AddRemoteService<ISpecialService>();
 |---------------------|---------------------|------------------|
 | `AutoRegisterEntityServices` | Auto-scan interfaces with `[Service]` attribute | `[Service]` attribute |
 | `AddRemoteService<TService>()` | Manually register any service interface | Explicit type specification |
-| `AddRemoteServiceGenerator<TFactory>()` | Aggregate multiple services through a factory | Auto-scan factory return types |
+| `AddRemoteServiceFactory<TFactory>()` | Aggregate multiple services through a factory | Auto-scan factory return types |
 
 #### Factory Pattern
 
-Define a factory interface aggregating multiple business services, register once via `AddRemoteServiceGenerator`:
+Define a factory interface aggregating multiple business services, register once via `AddRemoteServiceFactory`:
 
 ```csharp
 public interface RemoteServiceFactory
@@ -333,7 +333,7 @@ public interface RemoteServiceFactory
     IDemoDepartmentService DemoDepartmentService { get; }
 }
 
-services.AddRemoteServiceGenerator<RemoteServiceFactory>();
+services.AddRemoteServiceFactory<RemoteServiceFactory>();
 
 var factory = scope.ServiceProvider.GetRequiredService<RemoteServiceFactory>();
 var user = await factory.DemoUserService.GetByUserNameAsync("alice");
@@ -792,24 +792,22 @@ The server uses `ITypeNameResolver` to resolve the `ServiceName` (short type nam
 
 | Implementation | Behavior |
 |---------------|----------|
-| `DefaultServiceTypeResolver` | Default implementation. Scans all assemblies by short type name when no namespace is specified; when `ServiceNamespace`/`ModelNamespace` is specified, prefers exact match by `Namespace.TypeName`, falling back to full assembly short-name scan on failure |
+| `DefaultTypeResolver` | Default implementation. Scans all assemblies by short type name when no namespace is given; you can provide a `Namespaces` list to match namespaces in order (exact match via `Namespace.TypeName`, falling back to full assembly short-name scan on failure) |
 | `DelegateTypeNameResolver` | Custom resolution logic via delegate |
 | Custom `ITypeNameResolver` | Full control over the resolution process |
 
 ```csharp
 // Default: scan all assemblies by short type name
-options.ServiceTypeResolver = DefaultServiceTypeResolver.Instance;
+options.ServiceTypeResolver = DefaultTypeResolver.Instance;
 
-// Specify namespaces for faster exact matching and to avoid name conflicts
-options.ServiceTypeResolver = new DefaultServiceTypeResolver(
-    serviceNamespace: "MyApp.Services",
-    modelNamespace: "MyApp.Models");
+// Specify a namespace list (matched in order via `Namespace.TypeName` to speed up resolution and avoid name conflicts)
+options.ServiceTypeResolver = new DefaultTypeResolver("MyApp.Services", "MyApp.Models");
 
 // Or use a factory (can inject other DI services)
 builder.Services.AddRemoteServer(options =>
 {
     options.TypeNameResolverFactory = sp =>
-        new DefaultServiceTypeResolver("MyApp.Services", "MyApp.Models");
+        new DefaultTypeResolver("MyApp.Services", "MyApp.Models");
 });
 ```
 
@@ -985,7 +983,7 @@ opts.Transport = new NamedPipeTransport("liteorm-remote");
 
 ### 8.3 Default HTTP Transport (`HttpRemoteServiceTransport`)
 
-Built-in subclass of `JsonRemoteServiceTransport`, based on `HttpClient`. Configure via `RemoteServiceUri` + `ConfigureHttpClient` (see [Section 4.2](#42-client-configuration-liteormoptions)).
+Built-in subclass of `JsonRemoteServiceTransport`, based on `HttpClient`. Configure via `RemoteServiceUri` + `ConfigureHttpClient` (see [Section 4.2](#42-client-configuration-liteormremoteoptions)).
 
 The constructor accepts an `ICredentialsResolver?`; in `GetResponseJsonAsync` it obtains the ticket via `GetTicketAsync` and writes it to the HTTP request header using `TicketHeaderName` (default `Cookie`) and `TicketFormat` (default `{0}`):
 
@@ -1043,7 +1041,7 @@ For the JSON structure of requests and responses, see [Expression Serialization]
 2. **`CancellationToken` transparent passing**: The cancellation token is not serialized; it is passed end-to-end by the transport layer
 3. **Client and server must register the same `TableInfoProvider.Instance`**: `IdentityOutAttribute` resolves the Identity column through `TableInfoProvider.Instance`, with no reflection fallback
 4. **`ServiceName` consistency**: When both ends enable `AutoRegisterEntityServices`, the framework ensures consistency automatically; when manually registering custom names, both ends must call `TypeResolverHelper.Register`
-5. **Generic service interfaces**: `DefaultServiceTypeResolver` uses the CLR name format `Foo`1` to look up open generics, avoiding conflicts with non-generic types of the same name
+5. **Generic service interfaces**: `DefaultTypeResolver` uses the CLR name format `Foo`1` to look up open generics, avoiding conflicts with non-generic types of the same name
 6. **Base interface method inheritance**: Methods declared in the service type and all its base interfaces can be invoked; throws `AmbiguousMatchException` on duplicate method keys
 7. **Castle DynamicProxy compatibility**: When intercepting methods inherited from base interfaces, the framework automatically resolves the most derived service interface
 
