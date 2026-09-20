@@ -1,4 +1,4 @@
-﻿using LiteOrm.WebDemo.Contracts;
+using LiteOrm.WebDemo.Contracts;
 using Markdig;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
@@ -13,12 +13,26 @@ public sealed class DocsService
 
     private static readonly Dictionary<string, (string ZhTitle, string EnTitle, string? Summary)> ChapterTitles = new()
     {
-        ["01-getting-started"] = ("入门", "Getting Started", "环境准备与第一个 LiteOrm 示例"),
-        ["02-core-usage"] = ("核心使用", "Core Usage", "实体映射、视图模型、Expr 与查询基础"),
-        ["03-advanced-topics"] = ("高级特性", "Advanced Topics", "分表分库、性能、窗口函数、自定义分页、安全与远程服务"),
-        ["04-extensibility"] = ("扩展开发", "Extensibility", "自定义表达式、函数验证、SqlBuilder 方言扩展与前端 Expr 接入"),
-        ["05-reference"] = ("参考文档", "Reference", "配置参考、API 索引、术语表、SQL 示例与数据库兼容性"),
-        ["06-di"] = ("DI扩展", "DI Extension", "Autofac 集成、事务、权限过滤、日志诊断与动态 Controller"),
+        ["getting-started"] = ("入门", "Getting Started", "环境准备与第一个 LiteOrm 示例"),
+        ["core-usage"] = ("核心使用", "Core Usage", "实体映射、视图模型、Expr 与查询基础"),
+        ["di"] = ("DI扩展", "DI Extension", "Autofac 集成、事务、权限过滤、日志诊断与动态 Controller"),
+        ["advanced-topics"] = ("高级特性", "Advanced Topics", "分表分库、性能、窗口函数、自定义分页、安全、权限过滤、远程服务与数据映射"),
+        ["extensibility"] = ("扩展开发", "Extensibility", "自定义表达式、函数验证、SqlBuilder 方言扩展与前端 Expr 接入"),
+        ["typical-applications"] = ("应用场景", "Use Cases", "多租户、数据权限、软删除、审计、敏感数据、计算列与读写分离"),
+        ["reference"] = ("参考文档", "Reference", "配置参考、API 索引、术语表、AI 指南、SQL 示例与数据库兼容性"),
+        ["upgrade-guides"] = ("升级指南", "Upgrade Guides", "版本迁移与时序升级说明"),
+    };
+
+    private static readonly string[] ChapterOrder = new[]
+    {
+        "getting-started",
+        "core-usage",
+        "di",
+        "advanced-topics",
+        "extensibility",
+        "typical-applications",
+        "reference",
+        "upgrade-guides",
     };
 
     public DocsService(string docsPath)
@@ -46,7 +60,13 @@ public sealed class DocsService
             index.ReadmeHtml = RenderMarkdownToHtml(File.ReadAllText(readmePath), string.Empty);
 
         var directories = Directory.GetDirectories(_docsRoot)
-            .OrderBy(d => Path.GetFileName(d), StringComparer.Ordinal)
+            .OrderBy(d =>
+            {
+                var name = Path.GetFileName(d);
+                var idx = Array.IndexOf(ChapterOrder, name);
+                return idx >= 0 ? idx : int.MaxValue;
+            })
+            .ThenBy(d => Path.GetFileName(d), StringComparer.Ordinal)
             .ToList();
 
         foreach (var directory in directories)
