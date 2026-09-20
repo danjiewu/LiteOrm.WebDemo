@@ -1,10 +1,48 @@
 # Changelog
 
-## v8.1.7 (2026-09-10)
+## v8.1.8 (2026-09-16)
+
+### Breaking changes
+
+- **`DbCommandProxy` is now a per-call wrapper** (`LiteOrm`): the constructor is an internal overload `(DAOContext, DbCommand, bool ownsTarget)`, `Target` is private and `IsReusable` is read-only; `DAOContext.PreparedCommands` caches `DbCommand` and each call creates a proxy that does not own the cached command, so releasing the proxy no longer affects the cache.
+
+- **`SqlBuildContext` now takes the builder in its constructor** (`LiteOrm.Common` / `LiteOrm`): `SqlBuilder` is a required non-null constructor parameter; the parameterless and three-argument constructors were replaced by `SqlBuildContext(ISqlBuilder)` and `SqlBuildContext(ISqlBuilder, SqlTable?, string, string[]?)`, and `ToSql` / `ToPreparedSql` / `RenderComputedExpression` / `BuildFunctionSql` no longer take an `ISqlBuilder` or a parameter collection, reading both from the context instead.
+
+- **Simplified delegate signatures for function handlers and dynamic SQL** (`LiteOrm` / `LiteOrm.Common`): `FunctionSqlHandler` is now `(ref ValueStringBuilder, FunctionExpr, SqlBuildContext)` and `SqlGenerateHandler` is `(SqlBuildContext, object?)`; `RegisterFunctionSqlHandler(string, SimpleFunctionSqlHandler)` was renamed to `RegisterSimpleFunctionSqlHandler`.
+
+- **`IExprStringBuildContext.SqlBuilder` is now non-nullable** (`LiteOrm.Common`): narrowed from `ISqlBuilder?` to `ISqlBuilder`, and the null fallback in `ExprString` is gone.
+
+### Enhancements
+
+- **Enum constants are inlined** (`LiteOrm.Common`): an enum value in `Expr.Const` is emitted as its underlying number directly in the SQL (for example `"State" = 1`) instead of a parameter, so slices take no parameter slot.
 
 ### Fixes
 
-- **Fixed built-in generic services not being registered under AOT** (`LiteOrm`): `AddLiteOrm()` previously registered the generic DAOs and services (`ObjectDAO<>` / `ObjectViewDAO<>` / `EntityService<>` / `EntityViewService<>` and their interfaces) only when `AutoRegisterServices` was `false`. That branch never applies in AOT builds, so `GetRequiredService<IEntityService<T>>()` threw "No service for type ... has been registered". They are now registered unconditionally, and `AutoRegisterServices` only governs auto-registration of user-defined services and DAOs.
+- **DAO key-based read/write paths now carry the fixed filter** (`LiteOrm`): `GetObject` / `ExistsKey` / `Update` / `Delete` / `DeleteByKeys` and the batch write paths previously filtered by primary key only; they now apply the `ConstFilter` derived from `Column.Constant`, so rows the model cannot see cannot be read back, updated or deleted. Tables with a fixed filter also no longer reuse the command cache.
+
+- **Fixed cached commands being disposed right after setup** (`LiteOrm`): `GetOrAddPreparedCommand` released the command in a `finally` block right after assembling it for the cache, so the cache always held a disposed command and reusing it threw `ObjectDisposedException`. The command is now released only when setup fails or when a concurrent caller won the race.
+
+- **Fixed `DAOContext.IsValid` ignoring disposal** (`LiteOrm`): the pool disposes a context on return when it is invalid or when the pool is full (releasing its cached commands), but `IsValid` only rejected `Broken` connections, so `SessionManager` kept handing out disposed contexts. `IsValid` now also rejects disposed contexts, which are dropped and replaced.
+
+***
+
+## v8.1.7 (2026-09-14)
+
+### Breaking changes
+
+- **`DataSourceConfig` / `ReadOnlyDataSourceConfig` `Provider` / `SqlBuilder` replaced with assignable `Type` properties `ProviderType` / `SqlBuilderType`** (`LiteOrm.Common`). JSON keys are unchanged; values are resolved to a `Type` on load and throw `TypeLoadException` on failure. Code-built configs can only assign a `Type`; a `DataSourceConfig(Type providerType, string? connectionString)` constructor is provided.
+
+### New Features
+
+- **Added `LiteOrmContext`** (`LiteOrm`): a fluent context that needs no DI container. `AddDataSource<TConnection>` registers a data source, `CreateSession()` returns a session, and `new ObjectDAO<User>(session)` is ready for reads and writes. Registers no services and never reads `IConfiguration`.
+
+### Enhancements
+
+- **`EntityService` resolves event subscribers lazily** (`LiteOrm`): `IEntityServiceEvent<T>` is no longer resolved in the constructor; the container is queried on the first event notification and the resolved set is cached and reused afterwards, so subscriber construction failures surface on the first entity operation instead.
+
+### Fixes
+
+- **Fixed built-in generic services not being registered under AOT** (`LiteOrm`): generic DAOs and services are now registered unconditionally; `AutoRegisterServices` only governs user-defined services and DAOs.
 
 ***
 
@@ -226,7 +264,7 @@
 
 ### Breaking Changes
 
-This release introduces several breaking changes. See the [8.1 Upgrade Guide](./upgrade-guides/01-upgrade-guide-8.1.en.md) for migration details.
+This release introduces several breaking changes. See the [8.1 Upgrade Guide](./upgrade-guides/upgrade-guide-8.1.en.md) for migration details.
 
 - `RegisterLiteOrm()` moved from the `LiteOrm` base package to the new `LiteOrm.DependencyInjection` package; namespace changed from `LiteOrm` to `LiteOrm.DependencyInjection`
 

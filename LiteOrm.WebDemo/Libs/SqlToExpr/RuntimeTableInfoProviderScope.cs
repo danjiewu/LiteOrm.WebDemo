@@ -7,7 +7,7 @@ namespace LiteOrm.SqlToExpr;
 
 internal sealed class RuntimeTableInfoProviderScope : IDisposable
 {
-    private readonly TableInfoProvider? _previous;
+    private readonly TableInfoProvider _previous;
 
     public RuntimeTableInfoProviderScope(ISqlBuilder sqlBuilder)
     {
@@ -47,7 +47,7 @@ internal sealed class RuntimeTableInfoProviderScope : IDisposable
             _config = new DataSourceConfig
             {
                 Name = "default",
-                Provider = sqlBuilder.GetType().AssemblyQualifiedName ?? typeof(object).AssemblyQualifiedName!
+                ProviderType = sqlBuilder.GetType()!
             };
         }
 

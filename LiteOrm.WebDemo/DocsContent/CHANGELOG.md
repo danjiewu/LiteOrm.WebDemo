@@ -1,10 +1,48 @@
 # 变更日志 (Changelog)
 
-## v8.1.7 (2026-09-10)
+## v8.1.8 (2026-09-16)
+
+### 破坏性变更
+
+- **`DbCommandProxy` 改为按次创建的包装代理**（`LiteOrm`）：构造函数改为内部重载 `(DAOContext, DbCommand, bool ownsTarget)`，`Target` 改为私有，`IsReusable` 改为只读；`DAOContext.PreparedCommands` 改存 `DbCommand`，取用时新建不拥有缓存的代理，释放代理不再影响缓存。
+
+- **`SqlBuildContext` 改为构造注入构建器**（`LiteOrm.Common` / `LiteOrm`）：`SqlBuilder` 成为必填的非空构造参数，无参构造与三参构造替换为 `SqlBuildContext(ISqlBuilder)` 与 `SqlBuildContext(ISqlBuilder, SqlTable?, string, string[]?)`；`ToSql` / `ToPreparedSql` / `RenderComputedExpression` / `BuildFunctionSql` 等不再接收 `ISqlBuilder` 与参数集合，改从上下文读取。
+
+- **函数处理器与动态 SQL 委托签名简化**（`LiteOrm` / `LiteOrm.Common`）：`FunctionSqlHandler` 改为 `(ref ValueStringBuilder, FunctionExpr, SqlBuildContext)`，`SqlGenerateHandler` 改为 `(SqlBuildContext, object?)`；`RegisterFunctionSqlHandler(string, SimpleFunctionSqlHandler)` 更名为 `RegisterSimpleFunctionSqlHandler`。
+
+- **`IExprStringBuildContext.SqlBuilder` 改为非空**（`LiteOrm.Common`）：由 `ISqlBuilder?` 收窄为 `ISqlBuilder`，`ExprString` 的空值兜底分支随之移除。
+
+### 改进
+
+- **枚举常量改为内联字面量**（`LiteOrm.Common`）：`Expr.Const` 的枚举值按底层数值直接内联进 SQL（如 `"State" = 1`），不再走参数，切片不占参数位。
 
 ### 修复
 
-- **修复 AOT 下框架内置泛型服务未注册的问题**（`LiteOrm`）：`AddLiteOrm()` 此前只在 `AutoRegisterServices` 为 `false` 时才注册泛型 DAO 与服务（`ObjectDAO<>` / `ObjectViewDAO<>` / `EntityService<>` / `EntityViewService<>` 及其接口），AOT 构建下该分支不成立，`GetRequiredService<IEntityService<T>>()` 会抛 "No service for type ... has been registered"。现改为固定注册，`AutoRegisterServices` 只控制用户自定义服务与 DAO 的自动注册。
+- **DAO 主键读写路径补齐固定筛选条件**（`LiteOrm`）：`GetObject` / `ExistsKey` / `Update` / `Delete` / `DeleteByKeys` 与批量读写此前只按主键过滤，现改为带上 `Column.Constant` 收敛出的 `ConstFilter`，模型看不见的行读不出、改不动、删不掉；声明了固定筛选的表也不再复用命令缓存。
+
+- **修复命令缓存装配后即被释放**（`LiteOrm`）：`GetOrAddPreparedCommand` 在 `finally` 里释放了刚装配好并准备交给缓存的命令，缓存里的一直是已释放的命令，复用时抛 `ObjectDisposedException`。现改为仅在装配异常时释放，未命中才写入缓存。
+
+- **修复 `DAOContext.IsValid` 未判断上下文已释放**（`LiteOrm`）：连接池在归还上下文时若判定无效或池已满会释放它（连带释放缓存命令），而 `IsValid` 只在连接 `Broken` 时判无效，已释放的上下文仍被 `SessionManager` 复用。现增加已释放判断，释放过的上下文会被丢弃并重建。
+
+***
+
+## v8.1.7 (2026-09-14)
+
+### 破坏性变更
+
+- **`DataSourceConfig` / `ReadOnlyDataSourceConfig` 的 `Provider` / `SqlBuilder` 改为可赋值 `Type` 属性 `ProviderType` / `SqlBuilderType`**（`LiteOrm.Common`）。配置文件 JSON 键名不变，加载时立即解析为 `Type`，失败抛 `TypeLoadException`；代码中构造配置只能赋 `Type`，另提供 `DataSourceConfig(Type providerType, string? connectionString)` 构造。
+
+### 新特性
+
+- **新增 `LiteOrmContext`**（`LiteOrm`）：不依赖 DI 的链式上下文。`AddDataSource<TConnection>` 登记数据源，`CreateSession()` 返回会话，`new ObjectDAO<User>(session)` 即可读写。不注册服务、不读 `IConfiguration`。
+
+### 改进
+
+- **`EntityService` 的事件订阅者改为惰性解析**（`LiteOrm`）：构造时不再解析 `IEntityServiceEvent<T>`，首次触发事件通知时才向容器索取并缓存，此后复用同一份集合；订阅者构造异常随之延后到首次实体操作时暴露。
+
+### 修复
+
+- **修复 AOT 下框架内置泛型服务未注册**（`LiteOrm`）：泛型 DAO 与服务改为固定注册，`AutoRegisterServices` 只控制用户自定义服务与 DAO。
 
 ***
 
@@ -224,7 +262,7 @@
 
 ### 破坏性变更
 
-本版本引入多项破坏性变更，详细迁移指南见 [8.1 升级指南](./upgrade-guides/01-upgrade-guide-8.1.md)。
+本版本引入多项破坏性变更，详细迁移指南见 [8.1 升级指南](./upgrade-guides/upgrade-guide-8.1.md)。
 
 - `RegisterLiteOrm()` 从 `LiteOrm` 基础包移至 `LiteOrm.DependencyInjection` 包（新增），命名空间由 `LiteOrm` 改为 `LiteOrm.DependencyInjection`
 
