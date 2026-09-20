@@ -35,6 +35,8 @@ public sealed class DocsService
         "upgrade-guides",
     };
 
+    private static readonly Regex NavigationLinkRegex = new(@"\[[^\]]*\]\(\s*([^)\s]+)\s*\)", RegexOptions.Compiled);
+
     public DocsService(string docsPath)
     {
         _docsRoot = docsPath;
@@ -56,15 +58,32 @@ public sealed class DocsService
 
         var readmePath = Path.Combine(_docsRoot, useEnglish ? "README.en.md" : "README.md");
         if (!File.Exists(readmePath)) readmePath = Path.Combine(_docsRoot, "README.md");
+
+        string? readmeText = null;
         if (File.Exists(readmePath))
-            index.ReadmeHtml = RenderMarkdownToHtml(File.ReadAllText(readmePath), string.Empty);
+        {
+            readmeText = File.ReadAllText(readmePath);
+            index.ReadmeHtml = RenderMarkdownToHtml(readmeText, string.Empty);
+        }
+
+        var navIndexMap = BuildNavigationIndex(readmeText);
+        var chapterNavRank = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var entry in navIndexMap)
+        {
+            var slash = entry.Key.IndexOf('/');
+            if (slash <= 0) continue;
+            var dir = entry.Key[..slash];
+            if (!chapterNavRank.TryGetValue(dir, out var rank) || entry.Value < rank)
+                chapterNavRank[dir] = entry.Value;
+        }
 
         var directories = Directory.GetDirectories(_docsRoot)
             .OrderBy(d =>
             {
                 var name = Path.GetFileName(d);
+                if (chapterNavRank.TryGetValue(name, out var rank)) return rank;
                 var idx = Array.IndexOf(ChapterOrder, name);
-                return idx >= 0 ? idx : int.MaxValue;
+                return idx >= 0 ? navIndexMap.Count + idx : int.MaxValue;
             })
             .ThenBy(d => Path.GetFileName(d), StringComparer.Ordinal)
             .ToList();
@@ -116,11 +135,54 @@ public sealed class DocsService
                 else article.HasChinese = true;
             }
 
+            if (navIndexMap.Count > 0)
+                chapter.Articles.Sort((a, b) =>
+                {
+                    var ra = navIndexMap.TryGetValue(a.Path, out var ia) ? ia : int.MaxValue;
+                    var rb = navIndexMap.TryGetValue(b.Path, out var ib) ? ib : int.MaxValue;
+                    if (ra != rb) return ra.CompareTo(rb);
+                    return string.CompareOrdinal(a.Path, b.Path);
+                });
+
             if (chapter.Articles.Count > 0)
                 index.Chapters.Add(chapter);
         }
 
         return index;
+    }
+
+    private static Dictionary<string, int> BuildNavigationIndex(string? readmeText)
+    {
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(readmeText)) return map;
+
+        var order = 0;
+        foreach (Match m in NavigationLinkRegex.Matches(readmeText))
+        {
+            var href = m.Groups[1].Value.Trim();
+            var hashIdx = href.IndexOf('#');
+            if (hashIdx >= 0) href = href[..hashIdx];
+            href = href.Trim();
+            if (href.Length == 0) continue;
+
+            var path = href.Replace('\\', '/').TrimEnd('/');
+            if (path.StartsWith("./", StringComparison.Ordinal)) path = path[2..];
+            if (path.StartsWith("http://", StringComparison.Ordinal) ||
+                path.StartsWith("https://", StringComparison.Ordinal) ||
+                path.StartsWith("/") ||
+                path.StartsWith("mailto:", StringComparison.Ordinal))
+                continue;
+            if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) continue;
+
+            path = path[..^3];
+            if (path.Length == 0) continue;
+            path = NormalizeDocPath(path);
+
+            if (!map.ContainsKey(path))
+                map[path] = order++;
+        }
+
+        return map;
     }
 
     public DocsPage? GetPage(string relativePath, string lang = "zh")
