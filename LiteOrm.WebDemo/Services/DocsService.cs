@@ -35,6 +35,13 @@ public sealed class DocsService
         "upgrade-guides",
     };
 
+    /// <summary>不参与文档索引与访问的目录。</summary>
+    private static readonly HashSet<string> ExcludedDirectories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "series",
+        "assets",
+    };
+
     private static readonly Regex NavigationLinkRegex = new(@"\[[^\]]*\]\(\s*([^)\s]+)\s*\)", RegexOptions.Compiled);
 
     public DocsService(string docsPath)
@@ -78,6 +85,7 @@ public sealed class DocsService
         }
 
         var directories = Directory.GetDirectories(_docsRoot)
+            .Where(d => !IsExcluded(Path.GetFileName(d)))
             .OrderBy(d =>
             {
                 var name = Path.GetFileName(d);
@@ -190,6 +198,7 @@ public sealed class DocsService
         if (string.IsNullOrWhiteSpace(relativePath)) return null;
         var sanitized = relativePath.Trim('/', '\\');
         if (sanitized.Length == 0 || sanitized.Contains("..", StringComparison.Ordinal)) return null;
+        if (IsExcluded(sanitized.Split('/', '\\')[0])) return null;
 
         var fileBase = Path.Combine(_docsRoot, sanitized);
         bool useEnglish = string.Equals(lang, "en", StringComparison.OrdinalIgnoreCase);
@@ -220,6 +229,8 @@ public sealed class DocsService
             Html = html,
         };
     }
+
+    private static bool IsExcluded(string directoryName) => ExcludedDirectories.Contains(directoryName);
 
     private static (string ZhTitle, string EnTitle, string? Summary) GetChapterInfo(string dirName)
     {
