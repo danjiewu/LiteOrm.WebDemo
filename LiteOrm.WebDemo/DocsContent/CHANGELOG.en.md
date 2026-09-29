@@ -1,6 +1,52 @@
 # Changelog
 
-## v8.1.8 (2026-09-16)
+## v8.1.11 (2026-09-29)
+
+### Enhancements
+
+- **`ExprString` and `RawSql` moved into `LiteOrm.Common`** (`LiteOrm.Common`): both previously lived in the `LiteOrm` package and now move down alongside the expression infrastructure. The namespace is still `LiteOrm.Common`, so consuming code needs no change to its `using` directives or call sites.
+
+***
+
+## v8.1.10 (2026-09-27)
+
+### Breaking changes
+
+- **Declaring `Computed` no longer implies `Read`** (`LiteOrm.Common`): a computed column declared with `Computed` alone stays out of `SELECT` and serves query conditions only.
+
+### New Features
+
+- **Computed columns can be referenced in a nested fashion** (`LiteOrm.Common`): a `{Property}` placeholder may point at another computed column or a foreign column (`[ForeignColumn]`) on the same entity, expanded recursively into a nested expression with each level in its own parentheses.
+
+- **Added the `SqlTable.View` property** (`LiteOrm.Common`): table and view definitions can now reach each other.
+
+### Enhancements
+
+- **Entities with `SyncTable = Never` are no longer touched at initialization** (`LiteOrm.DependencyInjection`): no table is created and no table metadata is preloaded, so their invalid metadata configuration can no longer abort the whole sync pass.
+
+- **Command caching is now decided per statement** (`LiteOrm`): the new `useCache` parameter on `GetPreparedCommand(Async)` lets `Insert` / `BatchInsert` reuse the cache again, with the previous overloads kept.
+
+- **`GenericSqlExpr` supports an implicit conversion to `ValueTypeExpr`** (`LiteOrm.Common`): the result of `Expr.Sql(...)` can be used directly in value positions, with no manual `AsValue()` call.
+
+***
+
+## v8.1.9 (2026-09-22)
+
+### Breaking changes
+
+- **`[Intercept]` now uses Autofac's built-in attribute** (`LiteOrm.Common` / `LiteOrm.DependencyInjection`): LiteOrm's own `InterceptAttribute` (formerly `LiteOrm.Common/Attributes/InterceptAttribute.cs`) was removed in favour of `Autofac.Extras.DynamicProxy.InterceptAttribute`; code using the attribute must add `using Autofac.Extras.DynamicProxy;`. Auto registration now calls `EnableInterfaceInterceptors()` for implementation types declaring it, so the interceptors it lists take effect.
+
+### New Features
+
+- **Service authorization** (`LiteOrm.DependencyInjection` / `LiteOrm.Common`): the anonymous and role restrictions declared by `[ServicePermission]` are now enforced in `ServiceInvokeInterceptor`, with the caller's principal obtained from the injected `IUserContext.UserPrincipal` (authentication from `Identity.IsAuthenticated`, role matching via `IsInRole`; `LiteOrmOptions.RegisterUserContext` accepts a type, an instance or a factory). A failed check throws the new `ServicePermissionException`. Methods declaring `AllowAnonymous`, and calls made while no `IUserContext` is registered, pass through without a role check. The built-in `IEntityViewService<T>` is declared anonymous and `IEntityService<T>` requires authentication, so once `IUserContext` is registered a write with no principal is rejected.
+
+### Enhancements
+
+- **Simplified exception logging** (`LiteOrm` / `LiteOrm.DependencyInjection`): syncing schema at startup, beginning a transaction and initializing a connection pool no longer log the exception and then rethrow it; they throw directly and let the caller decide, so the same exception is no longer recorded twice. `LiteOrmCoreInitializer.SyncTables` drops the try/catch wrapping the whole sync pass and keeps only the per-table failure log.
+
+***
+
+## v8.1.8 (2026-09-20)
 
 ### Breaking changes
 
@@ -10,7 +56,7 @@
 
 - **Simplified delegate signatures for function handlers and dynamic SQL** (`LiteOrm` / `LiteOrm.Common`): `FunctionSqlHandler` is now `(ref ValueStringBuilder, FunctionExpr, SqlBuildContext)` and `SqlGenerateHandler` is `(SqlBuildContext, object?)`; `RegisterFunctionSqlHandler(string, SimpleFunctionSqlHandler)` was renamed to `RegisterSimpleFunctionSqlHandler`.
 
-- **`IExprStringBuildContext.SqlBuilder` is now non-nullable** (`LiteOrm.Common`): narrowed from `ISqlBuilder?` to `ISqlBuilder`, and the null fallback in `ExprString` is gone.
+- **`IExprStringBuildContext` drops the `SqlBuilder` property** (`LiteOrm.Common`): the builder is read from `SqlBuildContext` instead, and the explicit interface implementation on `DAOBase` plus the null fallback in `ExprString` are gone.
 
 ### Enhancements
 

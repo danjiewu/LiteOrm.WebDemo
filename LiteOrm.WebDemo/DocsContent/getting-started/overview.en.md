@@ -322,7 +322,7 @@ LiteOrm provides declarative transaction management through the `[Transaction]` 
 **Function**: Abstract base class for all DAOs, providing common operation methods
 
 **Main Methods**:
-- `GetPreparedCommand()`: Get a prepared command (regular tables reuse the context command cache, tables with a fixed filter build a one-off command)
+- `GetPreparedCommand()`: Get a prepared command (reuses the context command cache by default; pass `useCache: false` for a statement that contains a fixed filter or a computed-column expression, and it builds a one-off command)
 - `MakeNamedParamCommand()`: Create parameterized command
 - `MakeExprCommand()`: Create command from expression
 - `GetValue<T>()`: Execute query and return single value
@@ -487,6 +487,8 @@ LiteOrm is not a simplified version of EF Core—it's an independently designed 
 ### Misconception 2: You must define a Service class to use LiteOrm
 
 You can directly inject the framework's generic interfaces `IEntityServiceAsync<T>` and `IEntityViewServiceAsync<T>` without defining any custom Service class. This is very convenient during prototyping. Once your business logic stabilizes, you can gradually encapsulate custom Services.
+
+> Note that read/write capabilities are split by interface: `IEntityServiceAsync<T>` has write operations only and no query methods, while `IEntityViewServiceAsync<T>` has queries only and no write methods. When injecting the generic interfaces directly, you need to resolve both objects separately. If you want a single service object with both capabilities, inherit all four interfaces (`IEntityService<T>`, `IEntityServiceAsync<T>`, `IEntityViewService<T>`, `IEntityViewServiceAsync<T>`), or use the concrete `EntityService<T>` class directly.
 
 ### Misconception 3: Lambda queries and Expr queries are mutually exclusive
 

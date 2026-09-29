@@ -1,5 +1,7 @@
 # 权限过滤与用户范围控制
 
+权限分两层：一层决定「能不能调用这个方法」，由 `[ServicePermission]` 在 Service 层拦截，见[服务鉴权](../di/service-authorization.md)；另一层决定「调用之后能看到哪些行」，就是本篇讲的数据过滤。两层各管各的，通常搭配使用。
+
 当系统既要展示查询能力，又要避免普通用户读写到不属于自己的数据时，权限过滤就不能只停留在前端页面提示层。LiteOrm 中常见的承载位置有两层：
 
 1. **运行时 Expr**：按当前用户、当前租户、接口参数动态追加条件。
@@ -152,7 +154,7 @@ public class Department
 6. `UPDATE` / `DELETE` 语句同样带上这条规则；DAO 走主键的读写路径（`GetObject`、`ExistsKey`、`Update`、`DeleteByKeys`、批量更新与删除）也一并生效，即模型看不见的行读不出、改不动、删不掉。条件更新与删除（`Update(UpdateExpr)`、`Delete(LogicExpr)`）同样生效。
 7. 关联表的固定筛选只进表达式查询生成的关联语句。DAO 按主键读取（`GetObject`、`ExistsKey`）走的是模型自带的 `From` 片段，这段片段只拼关联键，不带关联表的固定筛选，用它读关联列时仍可能读到固定筛选之外的关联行内容；要把关联表一起限定住，用 `Search(...)` 这类表达式查询。
 
-声明了固定筛选的表不复用命令缓存：缓存保留的是首次生成的 SQL 与参数，而切片条件来自表元数据、运行时可能被替换（取值乃至条件结构都会变），复用会把旧内容固化下来；这类表每次调用都新建命令，新建的命令也不写入缓存，因此不会占用常规命令的缓存槽位。运行时替换 `TableDefinition.ConstFilter` 后，下一次调用即按新条件执行；代价是这类表每次操作多一次 SQL 拼接，未声明固定筛选的表照旧使用命令缓存（缓存里存的是底层命令本身，每次取用新建一个不拥有它的代理，释放代理不会影响缓存）。
+含固定筛选条件的语句不复用命令缓存：缓存保留的是首次生成的 SQL 与参数，而切片条件来自表元数据、运行时可能被替换（取值乃至条件结构都会变），复用会把旧内容固化下来；这类语句每次调用都新建命令，新建的命令也不写入缓存，因此不会占用常规命令的缓存槽位。运行时替换 `TableDefinition.ConstFilter` 后，下一次调用即按新条件执行；代价是这类语句每次操作多一次 SQL 拼接，不含该条件的语句（如 `Insert` / `BatchInsert`）照旧使用命令缓存（缓存里存的是底层命令本身，每次取用新建一个不拥有它的代理，释放代理不会影响缓存）。
 
 它适合：
 
@@ -172,7 +174,7 @@ var tableDefinition = TableInfoProvider.Instance.GetTableDefinition(typeof(Order
 tableDefinition.ConstFilter = Expr.Sql("TenantFilter");   // 构件内部直接读当前租户
 ```
 
-这样条件就脱离了「编译期常量」的约束，同时保留了 `ConstFilter`「任意查询、关联与写入路径都自动生效」的能力。取舍在于语义和代价：`ConstFilter` 变成运行时取值的属性之后，声明了它的表不再复用预定义命令缓存，每次操作都要重新拼接 SQL 并重建命令。这种做法完整的落地写法，包括租户接口、构件注册与生效范围，见[多租户隔离](../typical-applications/tenant-isolation.md)的示例三。
+这样条件就脱离了「编译期常量」的约束，同时保留了 `ConstFilter`「任意查询、关联与写入路径都自动生效」的能力。取舍在于语义和代价：`ConstFilter` 变成运行时取值的属性之后，含该条件的语句不再复用预定义命令缓存，每次都要重新拼接 SQL 并重建命令。这种做法完整的落地写法，包括租户接口、构件注册与生效范围，见[多租户隔离](../typical-applications/tenant-isolation.md)的示例三。
 
 这也意味着：如果你在 `ExistsRelated<Department>(...)` 里按部门表过滤用户，而 `Department` 本身又声明了 `State == Enabled` 一类的固定规则，那么这条规则会自动进入 `EXISTS` 子查询，不需要你在 `InnerExpr` 里再手写一次。
 
@@ -237,6 +239,7 @@ var filter = BuildBusinessFilter(request)
 ## 相关链接
 
 - [返回目录](../README.md)
+- [服务鉴权](../di/service-authorization.md)
 - [关联查询](../core-usage/associations.md)
 - [分表分库](../advanced-topics/sharding-and-tableargs.md)
 - [安全性](../advanced-topics/security.md)

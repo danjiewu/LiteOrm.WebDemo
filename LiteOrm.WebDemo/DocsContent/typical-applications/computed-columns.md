@@ -1,94 +1,246 @@
 # 计算列的实际应用
 
-计算列（`ColumnMode.Computed`）不生成物理列、不参与插入/更新，查询时 `SELECT` 与条件引用都按表达式返回结果。它最实际的价值是把"派生值"收敛到一处定义，既不用多落一个冗余列、也不用在 C# 侧到处手写同一条计算。
+计算列不生成物理列、不参与插入/更新，查询时 `SELECT` 与条件都按表达式返回结果。
 
-下面以订单表为例，看它在实际场景里怎么用。
+用 `Expression`（字符串）或运行时的 `ExpressionExpr`（Expr 树）声明。不写 `ColumnMode` 时按属性可访问性推导：可写属性得到 `Read | Computed`，查询时按表达式取值并回填，只读属性得到 `Computed`，只用于查询条件。
+
+下面走三个场景：按用户等级算折扣、商品上架状态位、跨表拼展示名。SQL 是 SQLite 方言下真实渲染出来的结果。
+
+## 需求一：按当前登录用户等级算折扣
+
+运营规则是「小计 → 按会员等级打折 → 应付」。折扣率跟着登录用户变，又不能当 SQL 参数传下去：会员等级是运行时才知道的东西，而订单得记住当时算出的应付金额。等级按取值拼成字面量，整段包进 `GenericSqlExpr`：
 
 ```csharp
-[Table("SalesOrders")]
-public class SaleOrder
+using LiteOrm.Common;
+using System.Globalization;
+
+GenericSqlExpr.Register("UserLevelDiscount", (context, _) =>
+{
+    decimal rate = CurrentUserContext.CurrentLevel switch
+    {
+        UserLevel.Silver => 0.02m,
+        UserLevel.Gold => 0.05m,
+        UserLevel.Diamond => 0.08m,
+        _ => 0m
+    };
+
+    string amount = Expr.Prop(context.DefaultTableAliasName, nameof(Order.Amount)).ToSql(context);
+    return $"{amount} * {rate.ToString(CultureInfo.InvariantCulture)}";
+}, true);
+```
+
+实体上只声明列位，表达式在启动时挂上去：
+
+```csharp
+[Table("Orders")]
+public class Order
 {
     [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
     public long Id { get; set; }
 
-    [Column("Quantity")]
-    public int Quantity { get; set; }
+    [Column("Amount")]
+    public decimal Amount { get; set; }
 
-    [Column("UnitPrice")]
-    public decimal UnitPrice { get; set; }
+    // 表达式在启动时动态挂上，声明时就得标出计算列；要读出结果，Read 位不能省
+    [Column("DiscountAmount", ColumnMode = ColumnMode.Read | ColumnMode.Computed)]
+    public decimal DiscountAmount { get; set; }
 
-    [Column("DeptId", AllowNull = true)]
-    public int? DeptId { get; set; }                 // null 表示全局共享数据
-
-    // 场景 1：派生展示列 —— 小计不落库，读出来就是表达式结果
-    [Column("LineTotal", Expression = "{Quantity} * {UnitPrice}", ColumnMode = ColumnMode.Computed)]
-    public decimal LineTotal { get; set; }
-
-    // 场景 3：可见性归一化 —— 把 null（全局共享）归一为 0，范围过滤时少一层特判
-    [Column("VisibleDept", Expression = "COALESCE({DeptId}, 0)", ColumnMode = ColumnMode.Computed)]
-    public int VisibleDept { get; set; }
+    // 只声明 Expression 即为计算列，可写属性默认推导为 Read | Computed
+    [Column("Payable", Expression = "{Amount} - {DiscountAmount}")]
+    public decimal Payable { get; set; }
 }
 ```
 
-## 场景 1：派生展示列
-
-小计是 `Quantity * UnitPrice`，如果落成物理列，插入/更新都要手动同步，改算法还得改两份。声明为计算列后，`SELECT` 直接返回表达式结果，列表展示不用在 C# 侧再算，也不引入需要人工维护的冗余列。
-
 ```csharp
-var row = await viewService.GetObjectAsync(id, ...);   // row.LineTotal 已经是表达式算出的值
+var table = TableInfoProvider.Instance.GetTableDefinition(typeof(Order))!;
+table.Columns.First(c => c.Name == "DiscountAmount").ExpressionExpr =
+    Expr.Sql("UserLevelDiscount");
 ```
 
-## 场景 2：同一表达式用于过滤与排序
+`Expr.Sql(...)` 赋给 `ExpressionExpr` 时，隐式转换会把它包成值表达式，不用手写 `AsValue()`；只有参与运算符或扩展方法链时才要显式调用。
 
-派生值不只能展示，还能直接进 `WHERE`。`LineTotal` 在查询条件里被展开为 `({Quantity} * {UnitPrice})`，无需把表达式再写一遍、也不用手拼字符串：
+建表时只剩物理列：
 
-```csharp
-var bigOrders = await viewService.SearchAsync(x => x.LineTotal >= 10000, ...);  // 大单筛选
-var top       = await viewService.SearchAsync(x => x.UnitPrice > 0, orderBy: o => o.LineTotal, ...);  // 按金额排序
+```sql
+CREATE TABLE "Orders" (
+  "Id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "Amount" DECIMAL(18,2) NOT NULL
+)
 ```
 
-但因为条件里展开的是表达式，这类过滤走不了普通列索引。量大的大单筛选应在物理列上建索引，或干脆落成冗余列。
+同一个查询在不同等级下渲染出的表达式不同，`Payable` 里的 `{DiscountAmount}` 会被整段展开：
 
-## 场景 3：可见性归一化，让范围过滤少一层特判
+```sql
+-- Silver (2%)
+("T0"."Amount" * 0.02)
+("T0"."Amount" - ("T0"."Amount" * 0.02))
 
-`DeptId = null` 表示全局共享数据、对所有人可见。范围过滤若要同时匹配"本部门 + 全局"，每个分支都得写 `DeptId == 部门 || DeptId == null`。用 `COALESCE({DeptId}, 0)` 归一为 `0` 后，只要 `VisibleDept == 0` 一个条件即可覆盖全局：
-
-```csharp
-var visible = Prop(nameof(SaleOrder.VisibleDept)) == user.DeptId
-           | Prop(nameof(SaleOrder.VisibleDept)) == 0;
+-- Gold (5%)
+("T0"."Amount" * 0.05)
+("T0"."Amount" - ("T0"."Amount" * 0.05))
 ```
 
-这条 `Expr` 既可以直接传给查询，也能塞进 `ConstFilter` 全局生效，见[数据权限](./data-permission.md)的方式二。归一化的起点（用 `0` 还是其他哨兵值）要避开真实的部门编号。
+执行一条 `Amount = 1000` 的订单，Gold 等级下读出 `DiscountAmount=50`、`Payable=950`。
 
-## 场景 4：只读计算属性走 Lambda 解析
+### 三条硬约束
 
-有些派生值不便于用 `[Column]` 静态声明——要么逻辑动态、要么只想在 `Lambda` 里引用而不要列语义。这时可以注册 Lambda 成员处理器，把实体上的只读计算属性翻译成 SQL 表达式，之后在 `Lambda` 查询里直接使用：
+- **表达式不能产生参数**：渲染时 `OutputParams` 只要多了参数就抛 `NotSupportedException`，所以折扣率只能内联成字面量，等级一变 SQL 文本就变，引用它的语句不走命令缓存，每次重新拼。要是规则改成每个订单一个费率，就该把费率落成物理列，计算列只剩 `{Amount} * {DiscountRate}`。
+- **片段不能为空**：`GenericSqlExpr` 回调返回 `null` 会渲染出 `()`，SQL 直接报语法错。没有折扣的等级要返回字面量 `0`，渲染成 `(0)`。
+- **字符串常量自己加引号**：`context.SqlBuilder.TryAppendSqlLiteral` 能帮忙转义，但它遇到反斜杠或控制字符会返回 `false`，这种只能改用数字或固定的安全写法。
+
+报错原文：
+
+```
+ColumnDefinition.ExpressionExpr for column 'DiscountAmount' produced 1 parameter(s);
+only fixed SQL expressions (property references, constants, functions, arithmetic) are allowed for computed columns.
+```
+
+### 用在哪里
+
+`DiscountAmount` 与 `Payable` 是普通计算列，`SELECT`、`WHERE`、`ORDER BY` 里都能直接用：
 
 ```csharp
-public class SaleOrder
+var bigOrders = await viewService.SearchAsync(
+    o => o.Payable >= 1000, cancellationToken: ct);          // 按应付金额筛选
+
+var top = await viewDao.Search(
+        Expr.Prop(nameof(Order.Payable)).Desc())
+    .Section(1, 20).ToListAsync(ct);                          // 按应付金额取前 20
+```
+
+```sql
+WHERE ("T0"."Amount" - ("T0"."Amount" * 0.05)) >= @0
+```
+
+两点留意：
+
+- 表达式是原地内联的：`{DiscountAmount}` 展开进 `Payable` 之后，`Amount` 在一条 SQL 里出现两次，层数再深还会继续翻倍，三层左右够用。
+- 不做环形引用检测：`A` 引用 `B`、`B` 又引用 `A` 会一直递归到栈溢出，只能靠人保证。
+
+## 需求二：商品上架状态位
+
+「能不能卖」是已上架、有库存、没被下架三个条件的组合，列表页、搜索页、导出接口都要用同一份判断。
+
+```csharp
+[Table("Products")]
+public class Product
 {
-    public DateTime CreateTime { get; set; }
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
 
-    // 只读计算属性，不落库：距离下单的天数
-    public int DaysAgo => (int)(DateTime.Now - CreateTime).TotalDays;
+    [Column("Stock")]
+    public int Stock { get; set; }
+
+    [Column("IsOnline")]
+    public bool IsOnline { get; set; }
+
+    // 只用于查询条件：只读属性推导为 Computed（无 Read 位），不进 SELECT
+    [Column("OnSale", Expression = "CASE WHEN {IsOnline} = 1 AND {Stock} > 0 THEN 1 ELSE 0 END")]
+    public bool OnSale => IsOnline && Stock > 0;
 }
-
-LambdaExprConverter.RegisterMemberHandler(typeof(SaleOrder), "DaysAgo", (node, converter) =>
-{
-    return new FunctionExpr("DATEDIFF", new FunctionExpr("DAY"), new PropertyExpr("CreateTime"), new FunctionExpr("CURRENT_DATE"));
-});
-
-// 之后即可在 Lambda 中使用
-var recent = await viewService.SearchAsync(x => x.DaysAgo <= 7, ...);
 ```
 
-与 `[Column(Computed)]` 的区别在「只读属性 vs 列」：前者不进列结构、不做 `SELECT` 字段，专门服务于动态/按需的 Lambda 条件；后者是真正的计算列，读回与条件都按表达式渲染。此方式适合 `RegisterMemberHandler` 按需注册，完整步骤见[表达式扩展 · 计算属性](../extensibility/expression-extension.md)。
+调用方写起来只剩一句：
+
+```csharp
+var onSale = await viewService.SearchAsync(p => p.OnSale, cancellationToken: ct);
+```
+
+```sql
+WHERE (CASE WHEN "T0"."IsOnline" = 1 AND "T0"."Stock" > 0 THEN 1 ELSE 0 END) = 1
+```
+
+`OnSale` 只用于条件：属性是只读的，推导出的模式就是 `Computed`，不带 `Read` 位，因此不进 `SELECT`，只在 `WHERE`、`ORDER BY` 里按表达式参与。换成可写属性会推导成 `Read | Computed`，那时想只用于条件才需要显式写 `ColumnMode = ColumnMode.Computed`。属性体跟 `Expression` 得保持同一条规则。属性类型写 `int` 还是 `bool` 不影响 SQL，`bool` 更贴合语义。
+
+常量必须内联，`{IsOnline} = 1` 里的 `1` 不能参数化。同一个判断改用 Expr 树写，可以直接用 `bool` 常量，渲染结果一样：
+
+```csharp
+table.Columns.First(c => c.Name == "OnSale").ExpressionExpr =
+    Expr.If(Expr.Prop("IsOnline") == Expr.Const(true) & Expr.Prop("Stock") > Expr.Const(0),
+            Expr.Const(true), Expr.Const(false));
+```
+
+想在表达式里拼一个运行时开关（比如「当前是否强制下架」）会抛 `NotSupportedException`，这类逻辑只能放到 `WHERE` 里用 `Expr.Value(...)` 参数化。
+
+## 需求三：跨表拼展示名
+
+列表页要显示「华东-Acme-C001 / SO-20260927-01」这种一眼能认的组合名，可它的两段分属两张表，为了列表把冗余字段落到订单表上又得跟着上游改。
+
+先给客户表定义展示名（`Region`、`Name`、`Code` 三段拼接，本身也是计算列）：
+
+```csharp
+[Table("Customers")]
+public class Customer
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+
+    [Column("Region", AllowNull = true)]
+    public string? Region { get; set; }
+
+    [Column("Name", AllowNull = true)]
+    public string? Name { get; set; }
+
+    [Column("Code", AllowNull = true)]
+    public string? Code { get; set; }
+
+    [Column("Label", Expression = "{Region} || '-' || {Name} || '-' || {Code}")]
+    public string? Label { get; set; }
+}
+```
+
+订单视图上要补三样：外键列、把客户展示名挂到本表的 `[ForeignColumn]`、引用它的计算列。
+
+```csharp
+[Table("SalesOrders")]
+[TableJoin(typeof(Customer), "CustomerId", Alias = "Customer", JoinType = TableJoinType.Left)]
+public class SaleOrderView
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public long Id { get; set; }
+
+    [Column("CustomerId")]
+    public int CustomerId { get; set; }
+
+    [Column("OrderNo", AllowNull = true)]
+    public string? OrderNo { get; set; }
+
+    [ForeignColumn("Customer", Property = nameof(Customer.Label))]
+    public string? CustomerName { get; set; }
+
+    [Column("OrderCustomerLabel", Expression = "{CustomerName} || '/' || {OrderNo}")]
+    public string? CustomerLabel { get; set; }
+}
+```
+
+`{CustomerName}` 指向的 `Label` 又是客户表上的计算列，两层一起展开，关联表的列按它自己的别名限定：
+
+```sql
+(("Customer"."Region" || '-' || "Customer"."Name" || '-' || "Customer"."Code") || '/' || "T0"."OrderNo")
+```
+
+`CustomerLabel` 在 `SELECT`、`WHERE`、`ORDER BY` 里都是这段完整表达式，查询时 `LEFT JOIN` 会自动带上：
+
+```sql
+SELECT (("Customer"."Region" || '-' || "Customer"."Name" || '-' || "Customer"."Code") || '/' || "T0"."OrderNo") AS "CustomerLabel"
+FROM "SalesOrders" "T0"
+LEFT JOIN "Customers" "Customer" ON "T0"."CustomerId" = "Customer"."Id"
+WHERE (("Customer"."Region" || '-' || "Customer"."Name" || '-' || "Customer"."Code") || '/' || "T0"."OrderNo") = @0
+```
+
+几点注意：
+
+- 实体上必须有 `[Table("...")]`：只标 `[TableJoin]` 不会让类型被当成表，`GetTableDefinition` 会返回 null。
+- 关联声明要齐全：`[TableJoin]`（或 `[ForeignType]`）负责建 JOIN，`[ForeignColumn]` 负责把外部列挂到本表属性上，缺一个名字就不存在。
+- 占位符写错不报错：它会原样输出限定列名（比如 `"T0"."CustomerLable"`），数据库执行到那一步才提示列不存在。
+- `[ForeignColumn]` 的属性得可写才会进 `SELECT`：只读属性没有 setter，读回来也填不进去，值只能靠属性体自己算。
+- 左联接没命中时整条链都取不到值：要兜底就在表达式里套一层 `COALESCE`，比如 `Expression = "COALESCE({CustomerName}, '未知客户') || '/' || {OrderNo}"`。
 
 ## 何时不适合
 
-- **要高频过滤/关联且靠索引**：计算列在 `WHERE` 展开为表达式，通常无法复用普通列索引，命中量大时应改回物理列并建索引。
-- **跨方言字符串/函数逻辑**：字符串 `Expression` 支持 `{属性名}` 占位符，也可以直接写方言原始 SQL，但迁移到不同数据库要随方言同步调整。
-- **需要参数化的动态逻辑**：Expr 树 `ExpressionExpr` 只允许不生成参数的固定表达式，带值的动态拼接会抛 `NotSupportedException`。
+- **要高频过滤或关联、又指望索引**：计算列在 `WHERE` 里展开成表达式，用不上普通列的索引。命中量大、要频繁按这个字段过滤或关联时，就落成物理列并建索引。
+- **跨方言的字符串与函数逻辑**：表达式里可以写方言的原始 SQL（上面的 `||` 是 SQLite / PostgreSQL 的写法，MySQL 用 `CONCAT(...)`），换数据库时这段要跟着改。字符串拼接优先用 Expr 树的 `Concat`，它会按方言生成。
+- **动态拼接**：表达式不接受运行时参数，带值的拼接会抛 `NotSupportedException`。
 
 ## 相关链接
 

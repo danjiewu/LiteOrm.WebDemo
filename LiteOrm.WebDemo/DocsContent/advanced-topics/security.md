@@ -174,7 +174,7 @@ ExprValidator (抽象基类)
 
 ```csharp
 // Minimum：允许基本查询条件（12 种类型）
-// Value, Property, Unary, ValueSet, LogicBinary, And, Or, Not, 
+// Value, Property, Unary, ValueSet, LogicBinary, And, Or, Not,
 // Where, OrderBy, OrderByItem, Section 等
 // 禁止：SelectItem, From, Table, Function, Update, Delete
 
@@ -268,6 +268,8 @@ public sealed class GenericSqlExpr : LogicExpr
 }
 ```
 
+`GenericSqlExpr` 还实现了到 `ValueTypeExpr` 的隐式转换，动态片段可直接用在 SELECT 列、函数参数、计算列等值位置；参与运算符或扩展方法链时仍要显式调用 `AsValue()`。
+
 ### 5.2 注册机制
 
 ```csharp
@@ -282,7 +284,7 @@ GenericSqlExpr.Register("CustomCheck", (context, arg) =>
 });
 
 // 在查询中使用
-var expr = Prop("IsActive") == true 
+var expr = Prop("IsActive") == true
     & new GenericSqlExpr("CustomCheck") { Arg = "someValue" };
 var users = await userService.SearchAsync(expr);
 ```

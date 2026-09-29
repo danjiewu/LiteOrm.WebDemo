@@ -1,6 +1,52 @@
 # 变更日志 (Changelog)
 
-## v8.1.8 (2026-09-16)
+## v8.1.11 (2026-09-29)
+
+### 改进
+
+- **`ExprString` 与 `RawSql` 移入 `LiteOrm.Common`**（`LiteOrm.Common`）：两者原在 `LiteOrm` 包中，现随表达式基础设施一并下移。命名空间仍为 `LiteOrm.Common`，引用方的 `using` 与调用方式无需改动。
+
+***
+
+## v8.1.10 (2026-09-27)
+
+### 破坏性变更
+
+- **显式定义 `Computed` 时不再自动带 `Read`**（`LiteOrm.Common`）：只写 `Computed` 的计算列不进 `SELECT`，只用于查询条件。
+
+### 新特性
+
+- **计算列支持嵌套引用**（`LiteOrm.Common`）：`{属性名}` 占位符可指向同一实体上的其他计算列或关联列（`[ForeignColumn]`），渲染时递归展开为嵌套表达式，每层自带括号。
+
+- **新增 `SqlTable.View` 属性**（`LiteOrm.Common`）：表定义与视图定义可互相反向获取。
+
+### 改进
+
+- **`SyncTable = Never` 的实体初始化时不再触碰**（`LiteOrm.DependencyInjection`）：不建表也不预加载表信息，其非法元数据配置不会再中断整批同步。
+
+- **命令缓存改为逐语句判定**（`LiteOrm`）：`GetPreparedCommand(Async)` 新增 `useCache` 参数，`Insert` / `BatchInsert` 恢复复用缓存，原签名重载保留。
+
+- **`GenericSqlExpr` 支持隐式转换为 `ValueTypeExpr`**（`LiteOrm.Common`）：`Expr.Sql(...)` 的结果可直接用于值位置，不必再手工调用 `AsValue()`。
+
+***
+
+## v8.1.9 (2026-09-22)
+
+### 破坏性变更
+
+- **`[Intercept]` 改用 Autofac 内置特性**（`LiteOrm.Common` / `LiteOrm.DependencyInjection`）：移除 LiteOrm 自带的 `InterceptAttribute`（原 `LiteOrm.Common/Attributes/InterceptAttribute.cs`），统一使用 `Autofac.Extras.DynamicProxy.InterceptAttribute`，引用该特性的代码需添加 `using Autofac.Extras.DynamicProxy;`；自动注册时会对声明该特性的实现类型调用 `EnableInterfaceInterceptors()`，特性声明的拦截器随之生效。
+
+### 新特性
+
+- **服务鉴权落地**（`LiteOrm.DependencyInjection` / `LiteOrm.Common`）：`[ServicePermission]` 声明的匿名与角色限制在 `ServiceInvokeInterceptor` 中生效，用户主体从注入的 `IUserContext.UserPrincipal` 获取（认证状态取 `Identity.IsAuthenticated`，角色匹配走 `IsInRole`；`LiteOrmOptions.RegisterUserContext` 支持泛型 / 实例 / 工厂注册），校验未通过抛新增的 `ServicePermissionException`。声明 `AllowAnonymous` 的方法与未注册 `IUserContext` 的场景直接放行，不校验角色。框架内置的 `IEntityViewService<T>` 声明为匿名放行，`IEntityService<T>` 声明为要求已认证，注册 `IUserContext` 后无主体的写入会被拒绝。
+
+### 改进
+
+- **简化异常的日志记录**（`LiteOrm` / `LiteOrm.DependencyInjection`）：启动同步表结构、开启事务、初始化连接池等位置不再先记日志再原样抛出，改为直接抛出，由调用方决定如何处理，同一异常不再重复记录。`LiteOrmCoreInitializer.SyncTables` 随之去掉包裹整段同步流程的 try/catch，只保留单表同步失败时的记录。
+
+***
+
+## v8.1.8 (2026-09-20)
 
 ### 破坏性变更
 
@@ -10,7 +56,7 @@
 
 - **函数处理器与动态 SQL 委托签名简化**（`LiteOrm` / `LiteOrm.Common`）：`FunctionSqlHandler` 改为 `(ref ValueStringBuilder, FunctionExpr, SqlBuildContext)`，`SqlGenerateHandler` 改为 `(SqlBuildContext, object?)`；`RegisterFunctionSqlHandler(string, SimpleFunctionSqlHandler)` 更名为 `RegisterSimpleFunctionSqlHandler`。
 
-- **`IExprStringBuildContext.SqlBuilder` 改为非空**（`LiteOrm.Common`）：由 `ISqlBuilder?` 收窄为 `ISqlBuilder`，`ExprString` 的空值兜底分支随之移除。
+- **`IExprStringBuildContext` 移除 `SqlBuilder` 属性**（`LiteOrm.Common`）：构建器统一从 `SqlBuildContext` 读取，`DAOBase` 的显式接口实现与 `ExprString` 的空值兜底分支一并移除。
 
 ### 改进
 
