@@ -40,6 +40,7 @@ public class User
 | `Name` | Database table name, supports placeholder for sharding. |
 | `DataSource` | Specifies the data source for the current entity. |
 | `SyncTable` | Entity-level table-structure sync mode, enum `SyncTableMode` (`Default` / `Never` / `Always`), defaults to `Default`. When set to `Never` or `Always`, it overrides the data-source-level `SyncTable` config. |
+| `AutoGenerateColumns` | Whether to auto-generate columns for properties without a `[Column]`, defaults to `true`. When set to `false`, only properties explicitly marked with `[Column]` are mapped as columns, and unmarked ones are ignored. |
 
 ## `[Column]` Attribute
 
@@ -53,6 +54,24 @@ public class User
 > `DbType` is of the `DbValueType` enum type, defaulting to `DbValueType.Default` (meaning "not specified — inferred from the property type").
 
 > **Complex types require an explicit `[Column]`**: properties of complex types — arrays/collections and custom classes (mapped as `Object`) — are **no longer auto-recognized as table columns** when they lack a `[Column]`. You must mark them explicitly with `[Column]` (specifying `DbType = Array` as appropriate) to persist them. Known scalars (numerics, `string`/`char`, `byte[]` → `Binary`, `Guid`, dates, enums → `Int32`) and `Json`/`Jsonb` mapped types are still auto-mapped as columns. The runtime (`AttributeTableInfoProvider`) and the AOT source generator (`TableInfoGenerator`) behave consistently.
+
+> **Explicit columns only**: with `[Table(AutoGenerateColumns = false)]`, properties without a `[Column]` are left out of the table definition entirely, so only explicitly declared properties become columns. Display-only, computed, or cached properties therefore never reach the SQL, and table-structure sync will not create physical columns for them.
+
+```csharp
+[Table("Users", AutoGenerateColumns = false)]
+public class User
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+
+    [Column("Name")]
+    public string Name { get; set; } = string.Empty;
+
+    public string DisplayLabel { get; set; } = string.Empty;   // no [Column], not mapped as a column
+}
+```
+
+`[Column(false)]` still marks a property as not mapped, and `[ForeignColumn]` properties are unaffected by this switch, still joining as foreign columns.
 
 ### Array Columns (PostgreSQL)
 
@@ -288,6 +307,23 @@ For more details, see [Sharding and TableArgs](../advanced-topics/sharding-and-t
 - Metadata like primary keys, identity columns, and data sources should be clearly defined at the model layer from the start.
 - For fields that need association queries, prefer using view models; don't pollute basic entities.
 - When dealing with cross-database or legacy database compatibility, confirm the corresponding dialect behavior in advance.
+
+## How metadata is parsed
+
+How does the framework know that class `User` maps to table `t_user` and property `Name` to column `name`? Through metadata. Table structure is parsed and cached in exactly one place, and everything else reads it from there. Parsing once is enough because table structure does not change while the process runs; re-reading attributes on every query would cost enough reflection to wipe out the performance advantage.
+
+`TableInfoProvider` is a global singleton (`TableInfoProvider.cs:10`) with only two entry points:
+
+- `GetTableDefinition(Type)` returns the table definition, used by writes and single-table queries.
+- `GetTableView(Type)` layers related tables on top of the table definition, used by JOIN queries.
+
+The default implementation `AttributeTableInfoProvider` reads attributes: `[Table]` and `[Column]` build the column model, while `[TableJoin]`, `[ForeignColumn]` and `[ForeignType]` build relationships.
+
+`BuildConstFilter` (`AttributeTableInfoProvider.cs:486`) collects `ColumnAttribute.Constant` from all columns into one condition and stores it in `TableDefinition.ConstFilter`. This is the "constant slice" the docs keep referring to; it is later appended automatically to WHERE, JOIN ON, UPDATE and DELETE. The full mechanism is in [Permission Filtering and User Scopes](../advanced-topics/permission-filtering.en.md).
+
+The type chain is `SqlObject` → `SqlTable` → `TableDefinition` and `TableView`; on the column side it is `SqlColumn` → `ColumnDefinition` and `ForeignColumn`.
+
+For changing metadata at runtime (setting `ExpressionExpr` dynamically, for example) see [Dynamically Modifying Column Definitions](#dynamically-modifying-column-definitions).
 
 ## Related Links
 

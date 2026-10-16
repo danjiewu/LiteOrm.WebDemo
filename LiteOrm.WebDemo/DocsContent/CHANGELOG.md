@@ -1,10 +1,42 @@
 # 变更日志 (Changelog)
 
-## v8.1.11 (2026-09-29)
+## v8.1.12 (2026-10-16)
+
+### 破坏性变更
+
+- **Lambda 删除扩展方法更名为 `DeleteAll` / `DeleteAllAsync`**（`LiteOrm.Common`）：`LambdaExprExtensions` 的 `Delete`、`DeleteAsync` 分别更名为 `DeleteAll`、`DeleteAllAsync`，与 `IEntityService<T>.DeleteAll(LogicExpr)` 命名保持一致。
+
+### 新特性
+
+- **`[Table]` 新增 `AutoGenerateColumns`**（`LiteOrm.Common`）：默认 `true`，未标注 `[Column]` 的标量属性自动映射为列；设为 `false` 时只有显式标注 `[Column]` 的属性才映射为列，`[Column(false)]` 与 `[ForeignColumn]` 的语义不变。运行时（`AttributeTableInfoProvider`）与 AOT 源生成器（`TableInfoGenerator`）行为一致。
+
+- **`Expr.Delete<T>` 支持 Lambda 条件**（`LiteOrm.Common`）：新增 `Expr.Delete<T>(Expression<Func<T, bool>>? whereExpression)` 重载，可由 Lambda 条件直接构造 `DeleteExpr`；并新增 `Expr.Delete(Type objectType, LogicExpr? whereExpr, params string[] tableArgs)` 重载，用于以 `LogicExpr` 构造删除表达式。
 
 ### 改进
 
-- **`ExprString` 与 `RawSql` 移入 `LiteOrm.Common`**（`LiteOrm.Common`）：两者原在 `LiteOrm` 包中，现随表达式基础设施一并下移。命名空间仍为 `LiteOrm.Common`，引用方的 `using` 与调用方式无需改动。
+- **`Expr.Update<T>` 的 WHERE 条件改为可选**（`LiteOrm.Common`）：`whereExpression` 参数允许为 `null`，可在无 WHERE 条件下构造 `UpdateExpr`。
+
+### 修复
+
+- **修复单表 UPDATE / DELETE 中表别名无法解析的 bug**（`LiteOrm.Common`）：Lambda 条件经 `Expr.Exists` 等嵌套 Lambda 引用外层参数，以及 Lambda 构造 `UpdateExpr` / `DeleteExpr` 时，属性表别名统一改用目标表名限定（替换时机提前到处理 WHERE 条件与赋值之前），不再渲染单表语句中不存在的默认别名 `T0`。
+
+***
+
+## v8.1.11 (2026-09-29)
+
+### 新特性
+
+- **`RegisterMemberHandler` 支持按类型注册**（`LiteOrm.Common`）：新增 `RegisterMemberHandler(Type type, string? memberName = null, handler)` 重载，`memberName` 传 null 时按类型登记成员兜底，显式指定成员的注册优先。
+
+### 改进
+
+- **`ExprString` 与 `RawSql` 移入 `LiteOrm.Common`**（`LiteOrm.Common`）：随表达式基础设施一并下移，命名空间不变，引用方无需改动。
+
+### 修复
+
+- **修正 MySQL 的 `CAST` 类型名**（`LiteOrm`）：`MySqlBuilder` 覆盖 `GetSqlTypeName`，整型渲染为 `SIGNED` / `UNSIGNED`、字符串与 Guid 渲染为 `CHAR`。OceanBase、TiDB、GreatDB 一并修正。
+
+- **修复数据库打开失败时连接未释放的 bug**（`LiteOrm`）：`DAOContextPool.PeekContext(Async)` 打开连接失败时未释放上下文，现改为失败即释放。
 
 ***
 
@@ -461,8 +493,6 @@
 ## v8.0.14 (2026-04-28)
 
 ### 新特性
-
-- 新增 CodeGen 项目 (`c862ffd`)
 
 - 新增 `StringExprConverter` 按实体类型的 `Parse`/`ParsePagedQuery` 方法 (`b4d422f`)
 

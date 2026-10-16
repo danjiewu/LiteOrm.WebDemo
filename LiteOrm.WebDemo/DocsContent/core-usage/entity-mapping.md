@@ -40,6 +40,7 @@ public class User
 | `Name` | 数据库表名，支持占位符分表。 |
 | `DataSource` | 指定当前实体所属数据源。 |
 | `SyncTable` | 实体级表结构同步模式，枚举 `SyncTableMode`（`Default` / `Never` / `Always`），默认 `Default`。设为 `Never` 或 `Always` 时将覆盖数据源级别的 `SyncTable` 配置。 |
+| `AutoGenerateColumns` | 是否为未标注 `[Column]` 的属性自动生成列，默认 `true`。设为 `false` 时只有显式标注 `[Column]` 的属性才映射为列，未标注的一律忽略。 |
 
 ## `[Column]` 特性
 
@@ -53,6 +54,24 @@ public class User
 > `DbType` 的类型为 `DbValueType` 枚举，默认 `DbValueType.Default`（表示未显式指定、按属性类型自动推断）。
 
 > **复杂类型需显式 `[Column]`**：数组/集合、以及自定义类（映射为 `Object`）等复杂类型的属性，若未标注 `[Column]` **不再被自动识别为表列**，必须显式 `[Column]`（并按其场景指定 `DbType = Array` 等）才会持久化。已知标量（数值、`string`/`char`、`byte[]`→`Binary`、`Guid`、日期、枚举→`Int32`）以及 `Json`/`Jsonb` 映射类型仍会自动映射为列。该规则在运行时（`AttributeTableInfoProvider`）与 AOT 源生成器（`TableInfoGenerator`）中保持行为一致。
+
+> **只认显式列**：`[Table(AutoGenerateColumns = false)]` 关掉自动映射后，未标注 `[Column]` 的属性一律不进表定义，只有显式声明的属性才作为列。实体上用于展示、计算或缓存的属性因此不会带进 SQL，也不会被表结构同步建成物理列。
+
+```csharp
+[Table("Users", AutoGenerateColumns = false)]
+public class User
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+
+    [Column("Name")]
+    public string Name { get; set; } = string.Empty;
+
+    public string DisplayLabel { get; set; } = string.Empty;   // 未标注 [Column]，不映射为列
+}
+```
+
+`[Column(false)]` 仍表示该属性不映射为列，`[ForeignColumn]` 属性也不受该开关影响，依旧作为外键列参与关联查询。
 
 ### 数组列（PostgreSQL）
 
@@ -304,6 +323,23 @@ public class Log : IArged
 - 主键、自增、数据源等元信息应在模型层一次性定义清楚。
 - 需要关联查询的字段，优先用视图模型承载，不要污染基础实体。
 - 涉及跨数据库或旧数据库兼容时，尽量提前确认对应方言行为。
+
+## 元数据是怎么解析的
+
+框架怎么知道 `User` 类对应 `t_user` 表、`Name` 属性对应 `name` 列？靠元数据。整个框架里，表结构信息只在这一处解析、这一处缓存，别的地方都来这儿取。解析一次就够，是因为表结构在程序运行期间不会变；要是每次查询都重新读一遍特性，光反射的开销就足以把性能优势吃干净。
+
+`TableInfoProvider` 是全局单例（`TableInfoProvider.cs:10`），只有两个入口：
+
+- `GetTableDefinition(Type)` 拿表定义，写操作和单表查询用它；
+- `GetTableView(Type)` 在表定义之上再叠一层关联表，做 JOIN 查询用它。
+
+默认实现 `AttributeTableInfoProvider` 读特性：`[Table]` 和 `[Column]` 建列模型，`[TableJoin]`、`[ForeignColumn]`、`[ForeignType]` 建关联关系。
+
+`BuildConstFilter`（`AttributeTableInfoProvider.cs:486`）把所有列上的 `ColumnAttribute.Constant` 收成一个条件，存进 `TableDefinition.ConstFilter`。这就是文档里常说的"固定切片"，后面会自动加到 WHERE、JOIN ON、UPDATE、DELETE 上。完整机制见 [权限过滤与用户范围](../advanced-topics/permission-filtering.md)。
+
+类型链：`SqlObject` → `SqlTable` → `TableDefinition` 和 `TableView`；列那边是 `SqlColumn` → `ColumnDefinition` 和 `ForeignColumn`。
+
+运行期改元数据（比如动态设 `ExpressionExpr`）见 [动态修改列定义](#动态修改列定义)。
 
 ## 相关链接
 

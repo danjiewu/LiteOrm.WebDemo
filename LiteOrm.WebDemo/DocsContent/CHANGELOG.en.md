@@ -1,10 +1,42 @@
 # Changelog
 
-## v8.1.11 (2026-09-29)
+## v8.1.12 (2026-10-16)
+
+### Breaking changes
+
+- **Lambda delete extension methods renamed to `DeleteAll` / `DeleteAllAsync`** (`LiteOrm.Common`): `LambdaExprExtensions.Delete` and `DeleteAsync` are renamed to `DeleteAll` and `DeleteAllAsync` respectively, aligning with `IEntityService<T>.DeleteAll(LogicExpr)`.
+
+### New Features
+
+- **`AutoGenerateColumns` added to `[Table]`** (`LiteOrm.Common`): defaults to `true`, auto-mapping unmarked scalar properties as columns; when set to `false`, only properties explicitly marked with `[Column]` are mapped as columns, while `[Column(false)]` and `[ForeignColumn]` keep their meaning. The runtime (`AttributeTableInfoProvider`) and the AOT source generator (`TableInfoGenerator`) behave identically.
+
+- **`Expr.Delete<T>` now accepts a Lambda condition** (`LiteOrm.Common`): the new `Expr.Delete<T>(Expression<Func<T, bool>>? whereExpression)` overload builds a `DeleteExpr` directly from a Lambda condition; a new `Expr.Delete(Type objectType, LogicExpr? whereExpr, params string[] tableArgs)` overload builds one from a `LogicExpr`.
 
 ### Enhancements
 
-- **`ExprString` and `RawSql` moved into `LiteOrm.Common`** (`LiteOrm.Common`): both previously lived in the `LiteOrm` package and now move down alongside the expression infrastructure. The namespace is still `LiteOrm.Common`, so consuming code needs no change to its `using` directives or call sites.
+- **The WHERE condition on `Expr.Update<T>` is now optional** (`LiteOrm.Common`): the `whereExpression` parameter accepts `null`, so an `UpdateExpr` can be built without a WHERE clause.
+
+### Fixes
+
+- **Fixed unresolved table aliases in single-table UPDATE / DELETE statements** (`LiteOrm.Common`): references to the outer parameter from nested Lambdas such as `Expr.Exists`, as well as property aliases when building `UpdateExpr` / `DeleteExpr` from Lambdas, are now qualified by the target table name (substituted before WHERE conditions and assignments are processed), rather than the default alias `T0`, which does not exist in single-table statements.
+
+***
+
+## v8.1.11 (2026-09-29)
+
+### New Features
+
+- **`RegisterMemberHandler` can now register by type** (`LiteOrm.Common`): the new `RegisterMemberHandler(Type type, string? memberName = null, handler)` overload installs a member fallback for the type when `memberName` is null; an explicitly registered member takes precedence.
+
+### Enhancements
+
+- **`ExprString` and `RawSql` moved into `LiteOrm.Common`** (`LiteOrm.Common`): moved down alongside the expression infrastructure; the namespace is unchanged, so consuming code needs no change.
+
+### Fixes
+
+- **Corrected `CAST` type names on MySQL** (`LiteOrm`): `MySqlBuilder` now overrides `GetSqlTypeName`, rendering integers as `SIGNED` / `UNSIGNED` and strings or Guids as `CHAR`. OceanBase, TiDB and GreatDB are fixed along with it.
+
+- **Fixed a bug where the connection was not released when the database open failed** (`LiteOrm`): `DAOContextPool.PeekContext(Async)` left the context undisposed on a failed open, the context is now released on failure.
 
 ***
 
@@ -463,8 +495,6 @@ This release introduces several breaking changes. See the [8.1 Upgrade Guide](./
 ## v8.0.14 (2026-04-28)
 
 ### New Features
-
-- Added CodeGen project (`c862ffd`)
 
 - Added `StringExprConverter` with `Parse`/`ParsePagedQuery` methods by entity type (`b4d422f`)
 
