@@ -193,28 +193,171 @@ var users = await userService.SearchAsync(
 
 `ExistsRelated` 会根据 `ForeignType` / `TableJoin` 等元数据自动补关联条件。适合模型里已经声明好关联路径，只想"按关联表条件过滤主表"的场景。匹配逻辑、继承链规则和 `ConstFilter` 行为请看[关联查询](./associations.md)。
 
-## 6. 投影查询（`SearchAs` / `SearchOneAs`）
+### 5.3 嵌套 Lambda 与参数作用域
 
-`SearchAs` / `SearchOneAs` 支持 IQueryable 形式的 Lambda，把结果投影为指定类型（自定义类、匿名类均可），适合「只取部分列」或「组装成视图 / 摘要对象」：
+内层 Lambda 的参数按引用区分作用域，与外层参数同名时不会互相覆盖：
 
 ```csharp
-// 投影为自定义类
+// 内层与外层参数均命名 u，转换完成后外层 u 的引用依然有效
+var users = await userService.SearchAsync(
+    u => u.Age > 18 && Exists<Department>(u => u.Name == "研发中心") && u.UserName != null
+);
+```
+
+多参数 Lambda 的全部参数都会注册：第一个参数对应别名 `T0` 的根表，其余参数获得新别名 `T{n}`。
+
+自定义方法处理器里转换内层 Lambda 时，可以通过构造重载把外层参数上下文传进子转换器，内层即可引用外层参数，且父子转换器共享别名编号，嵌套作用域不会分配到重复别名：
+
+```csharp
+LambdaExprConverter.RegisterMethodHandler("ExistsIn", (node, converter) =>
+{
+    var lambda = (LambdaExpression)((UnaryExpression)node.Arguments[1]).Operand;
+    var child = new LambdaExprConverter(lambda, converter);
+    // 子转换器的根表作为子查询外表，InnerExpr 中可见外层参数
+    return new ForeignExpr(child.Table!.Type)
+    {
+        Alias = child.Table!.Alias,
+        InnerExpr = child.ToLogicExpr()
+    };
+});
+```
+
+扩展点注册的完整机制见[表达式扩展](../extensibility/expression-extension.md)。
+
+### 5.4 连接查询 `Join` 与 `JoinRelated`
+
+`Join<T2>` 显式给出连接条件，`JoinRelated<T2>` 按外键元数据自动推断。两者都是 `From<T1>()` 返回的 `QuerySource<T1>` 上的实例方法，左表类型已经定住，所以只写右表类型：
+
+```csharp
+using static LiteOrm.Common.Expr;
+
+// 显式条件
+var expr = Query<Order, IEnumerable<(Order, Customer)>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Where((o, c) => c.Name == "VIP")
+);
+
+// 需要投影时，结果类型写 IEnumerable<object>（匿名类型无法写进泛型实参）
+var projected = Query<Order, IEnumerable<object>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Select((o, c) => new { o.Id, c.Name })
+);
+
+// 自动推断外键条件
+var related = Query<Order, IEnumerable<(Order, Customer)>>(
+    q => From<Order>().JoinRelated<Customer>()
+);
+
+// 自动条件 + 附加条件，两者按 AND 合并
+var merged = Query<Order, IEnumerable<(Order, Customer)>>(
+    q => From<Order>().JoinRelated<Customer>((o, c) => o.Amount > 0)
+);
+
+// 多表连接：每次只写一张右表，结果逐级平铺为 (Order, Customer, Region)
+var multiple = Query<Order, IEnumerable<(Order, Customer, Region)>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Join<Region>((o, c, r) => c.RegionId == r.Id)
+          .Where((o, c, r) => r.Name == "North")
+);
+
+// 多表自动推断：每次 JoinRelated 同样只写一张右表
+var multipleRelated = Query<Order, IEnumerable<(Order, Customer, Region)>>(
+    q => From<Order>().JoinRelated<Customer>().JoinRelated<Region>()
+);
+
+// 多参数排序 / 分组
+var ordered = Query<Order, IEnumerable<object>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Where((o, c) => o.Amount > 10)
+          .OrderBy((o, c) => c.Name)
+          .ThenByDescending((o, c) => o.Amount)
+          .Select((o, c) => new { o.Id, c.Name, o.Amount })
+);
+
+var grouped = Query<Order, IEnumerable<object>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .GroupBy((o, c) => c.Name)
+          .OrderBy(g => g.Key)
+          .Select(g => new { Name = g.Key, Count = g.Count() })
+);
+```
+
+返回的是元素元组序列，`Where` / `OrderBy` 会保持元素元组类型，`Select` 则会把元素类型改成投影结果。`Where` / `Select` / `OrderBy` / `GroupBy` 等可直接用多参数 Lambda（如 `(o, c) => ...`），参数按表顺序对应；也仍可用 `x.Item1`、`x.Item2`……`x.Item7` 访问元组元素，分别对应左表和各个右表，解析时各自带上正确的表别名。多表连接采用链式调用：`From<T1>()` 返回 `QuerySource<T1>`，`Join<T2>` 返回 `QuerySource<T1, T2>`，再调用 `Join<T3>` 得到 `QuerySource<T1, T2, T3>`，依次最多到 7 个元素。结果元组始终按顺序平铺；链式调用的 `on` 参数按顺序一表一个，即已连接的每张表在前、新右表在最后。
+
+`Join` / `JoinRelated` 是实例方法，既能在 Lambda 内解析，也能在 Lambda 外直接拼表达式；`Expr.Query` 与 `Expr.From<T>()` 链式写法都是受支持的入口。
+
+> **不要混用 `Join` / `JoinRelated` 与视图。** 这两个方法面向实体表。视图模型（`ObjectViewDAO<TView>`，或带 `[ForeignColumn]` 的类型）已经通过元数据自动生成关联 JOIN；若把视图作为查询源或 `Join` 的右表，视图自身的关联表会与显式连接重复，容易产生别名冲突或无法解析的列，当前版本不保证这种组合的行为。需要关联数据时，直接查询视图让 `ForeignColumn` 自动关联；需要按关联表过滤时使用 `ExistsRelated`；需要显式多表连接时使用实体类型。
+
+几处要点：
+
+- `Join` 生成的 SQL 形如 `FROM Orders T0 LEFT JOIN Customers T1 ON T0.CustomerId = T1.Id`，连接类型默认左连接。
+- `JoinRelated` 推断不到关联关系时抛 `InvalidOperationException`，提示改用带条件的 `Join`。这类表需要先用 `[ForeignType]` 或 `[TableJoin]` 声明关联。
+- 支持多级连接，`From<A>().Join<B>(...).Join<C>(...)` 会连续追加 JOIN。连接条件的 lambda 参数按「已连接的各表 + 新右表」顺序排列：第二级连接是 `(a, b, c) => ...`，第三级连接是 `(a, b, c, d) => ...`，直接按参数名引用对应的表即可。
+- 链式连接中每个 `Join` / `JoinRelated` 只负责追加一张表，显式条件只需描述该段与已连接表的关联；`JoinRelated` 仍按外键元数据推断条件，显式条件与自动条件取 AND。
+- 连接结果（2~7 张表）的 `Where` / `Select` / `OrderBy` / `OrderByDescending` / `ThenBy` / `ThenByDescending` / `GroupBy` 都可以直接按表写多参数 Lambda：`Where((o, c) => o.Amount > 10 && c.Name == "VIP")`、`Select((o, c) => new { o.Id, c.Name })`、`OrderBy((o, c) => o.Amount)`、`GroupBy((o, c) => o.CustomerId)`；多表时依次写 `(o, c, r) => ...`。扩展方法会把各参数重写成 `x.Item1` ~ `x.Item7`，与 `x => x.Item1...` 写法等价。
+- 连接表别名按分配顺序生成，需要按别名手工拼 `SelectItemExpr` 时从 `from.Source.Alias` 与 `from.Joins[i].Source.Alias` 读取，不要写死 `T1`，外层查询可能已经占用过该编号。
+- `Select(x => x.Item1)` 这种整表投影不支持，`Select` 里请写具体列，例如 `Select(x => new { x.Item1.Id, x.Item2.Name })`。元组元素 `x.Item1` 直接当列用会抛 `NotSupportedException`。
+- `Join` / `JoinRelated` 后接 `Select` 时元素类型已经变化，`Expr.Query<T, TResult>` 的 `TResult` 不能再写连接结果的元组类型，应改为 `IEnumerable<object>`（或与投影结果类型兼容的接口）。
+
+`QuerySource<T>` 实现 `IQueryable<T>`，所以在 Lambda 之外也能拼查询，再交给 DAO 转成 SQL 执行：
+
+```csharp
+// 直接从容器取，已绑定执行器，不需要先拿 DAO
+var users = serviceProvider.GetRequiredService<QuerySource<User>>();
+
+foreach (User user in users.Where(u => u.Age >= 18)) { }
+List<User> adults = users.Where(u => u.Age >= 18).ToList();
+
+// 异步：Where 返回静态类型 IQueryable，用 AsSource 收窄回 QuerySource 即可用异步实例方法
+List<User> asyncAdults = await users.Where(u => u.Age >= 18).AsSource().ToListAsync();
+int count = await users.Where(u => u.Age >= 18).AsSource().CountAsync();
+
+await foreach (User u in users.Where(u => u.Age >= 18).AsSource().ToAsyncEnumerable()) { }
+
+// 投影之后同样适用，AsSource 的元素类型会跟着 Select 走
+List<string> names = await users.Where(u => u.Age >= 18)
+    .Select(u => u.Name)
+    .AsSource()
+    .ToListAsync();
+
+// 链尾调用 GetQueryExpr() 把查询转成 Expr，不需要执行器
+var expr = users.Where(u => u.Age >= 18).Select(u => new { u.Id, u.Name }).GetQueryExpr();
+
+// 也可以交给 DAO 执行，任意 IQueryable 源都接受
+var dao = serviceProvider.GetRequiredService<ObjectViewDAO<User>>();
+var result = await dao.SearchAs(
+    users.Where(u => u.Age >= 18).Select(u => new { u.Id, u.Name })).ToListAsync();
+```
+
+`Expr.From<T>()` 返回的实例不带执行器，只能用来拼表达式；直接枚举或调用 `ToList` 会抛 `InvalidOperationException`，提示补上执行器。`QuerySource<T>` 与其 DAO 生命周期一致，不要缓存到单例或静态字段里。
+
+## 6. 投影查询（`SearchAs` / `SearchOneAs`）
+
+`SearchAs` / `SearchOneAs` 有两组重载：接收 IQueryable Lambda，或接收已拼好的 `IQueryable<T>`。两者都把结果投影为指定类型（自定义类、匿名类均可），适合「只取部分列」或「组装成视图 / 摘要对象」。
+
+```csharp
+// IQueryable Lambda 形式
 List<UserSummary> summaries = userService.SearchAs(
     q => q.Where(u => u.Age >= 18)
           .Select(u => new UserSummary { UserName = u.UserName, Age = u.Age })
 );
 
-// 投影为匿名类（列别名与匿名成员名一一对应）
+// 也可以先用 Expr.From<T>() 拼好查询，再直接传入
 var anon = userService.SearchAs(
-    q => q.Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
+    Expr.From<User>().Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
 );
 
 // 只过滤不投影：TResult 推断为实体类型
-List<User> adults = userService.SearchAs(q => q.Where(u => u.Age >= 18));
+List<User> adults = userService.SearchAs(Expr.From<User>().Where(u => u.Age >= 18));
 
 // 单条
 UserSummary? one = userService.SearchOneAs(
-    q => q.Where(u => u.Id == 1).Select(u => new UserSummary { UserName = u.UserName, Age = u.Age })
+    Expr.From<User>().Where(u => u.Id == 1).Select(u => new UserSummary { UserName = u.UserName, Age = u.Age })
 );
 ```
 
@@ -224,13 +367,17 @@ UserSummary? one = userService.SearchOneAs(
 var list = await userService.SearchAsAsync(
     q => q.Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
 );
+
+var list2 = await userService.SearchAsAsync(
+    Expr.From<User>().Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
+);
 ```
 
-> `SearchAs` 的 Lambda 会被转换为 `SelectExpr` 后执行（等价于 [查询总览](./query-overview.md#3-search-vs-searchas) 中的 `SelectExpr` 用法）。结果映射由 `DataReaderConverter` 完成：未注册的普通类 / 匿名类按「成员名 ↔ 列别名」匹配，注册过的实体类型按位置匹配——建议优先使用 DTO / 匿名类投影。分表时通过 `tableArgs` 参数指定分表名。
+> `SearchAs` 会把 Lambda 或 `IQueryable<T>` 查询转成 `SelectExpr` 后执行（等价于 [查询总览](./query-overview.md#3-search-vs-searchas) 中的 `SelectExpr` 用法）。结果映射由 `DataReaderConverter` 完成：未注册的普通类 / 匿名类按「成员名 ↔ 列别名」匹配，注册过的实体类型按位置匹配，建议优先使用 DTO / 匿名类投影。分表时通过 `tableArgs` 参数指定分表名，缺省取查询根上的分表参数。
 
 ## 7. JsonNode 查询
 
-LiteOrm 原生支持 `System.Text.Json.Nodes.JsonNode`（含 `JsonObject`、`JsonArray`、`JsonValue`）类型的属性——自动映射为 JSON 列（字符串存储），并支持在 Lambda 中直接通过索引器和 `GetValue<T>()` 查询 JSON 字段。
+LiteOrm 原生支持 `System.Text.Json.Nodes.JsonNode`（含 `JsonObject`、`JsonArray`、`JsonValue`）类型的属性，自动映射为 JSON 列（字符串存储），并支持在 Lambda 中直接通过索引器和 `GetValue<T>()` 查询 JSON 字段。
 
 > JsonNode 属性的自动映射与序列化机制详见 [数据映射与值转换](../advanced-topics/data-mapping.md#33-jsonnode-映射导航)。
 
@@ -308,7 +455,7 @@ var price = await configDAO.Search(
 
 ### 8.1 Lambda 中不支持的方法会怎样？
 
-如果 Lambda 中调用了未注册处理器的方法（即 `LiteOrmLambdaHandlerInitializer` 未覆盖的方法），LiteOrm 会在解析阶段抛出异常，提示该方法不被支持。这是设计上的安全保障——不会静默忽略未知方法，而是让开发者尽早发现问题。
+如果 Lambda 中调用了未注册处理器的方法（即 `LiteOrmLambdaHandlerInitializer` 未覆盖的方法），LiteOrm 会在解析阶段抛出异常，提示该方法不被支持。这是设计上的安全保障：未知方法不会被静默忽略，解析阶段就抛异常，开发者能尽早发现。
 
 如需支持自定义方法，可以参考 `LiteOrmLambdaHandlerInitializer` 中的注册方式，通过 `LambdaExprConverter.RegisterMethodHandler` 注册自定义处理器。
 

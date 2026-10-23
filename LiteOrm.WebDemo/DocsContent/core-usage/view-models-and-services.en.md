@@ -16,6 +16,8 @@ public class UserView : User
 
 This way, when querying `UserView`, LiteOrm can automatically generate JOIN based on foreign key relationships.
 
+> A view model already carries its association JOINs. **Do not use a view as the query source or the right table of `Join` / `JoinRelated`.** Use entity types for explicit multi-table joins, and use `ExistsRelated` when filtering by a related table. Mixing them duplicates the view's automatic joins and may cause alias conflicts or unresolvable columns.
+
 `ForeignColumn` supports declaring its own column-level converter: `[ForeignColumn(typeof(Department), Property = "Name", ConverterType = typeof(SomeValueConverter))]`. When reading, **it prefers its own `ConverterType` and otherwise falls back to the target column's converter**. `ConverterType` works like `ColumnAttribute.ConverterType` (provide a type implementing `IDbValueConverter`).
 
 Whether a foreign column takes part in `SELECT` depends only on whether the property is writable: only a writable property needs a read-back. Written as a read-only property (`=> ...`) it stays out of `SELECT` and the property body computes the value. This is unrelated to the target column's own definition, so a target that is an unreadable computed column does not affect the value here (and `ForeignColumnAttribute` has no mode parameter to declare otherwise).
@@ -74,14 +76,13 @@ public class UserWriteDao : ObjectDAO<User>
 ```
 
 ```csharp
-using static LiteOrm.Common.Expr;
 public class UserViewDao : ObjectViewDAO<UserView>
 {
     public UserViewDao(SessionManager sessionManager) : base(sessionManager) { }
 
     public Task<List<UserView>> GetActiveUsersAsync(CancellationToken cancellationToken = default)
     {
-        return Search(Prop("Age") >= 18).ToListAsync(cancellationToken);
+        return Search(u => u.Age >= 18).ToListAsync(cancellationToken);
     }
 }
 ```
@@ -103,8 +104,15 @@ public class UserService : EntityService<User>
 ```csharp
 using static LiteOrm.Common.Expr;
 
-var summary = await userService.SearchAsAsync<UserSummary>(
-    From<UserView>()
+// Preferred: Lambda projection
+var summary = await userService.SearchAsAsync(
+    q => q.Where(u => u.Age >= 18)
+          .Select(u => new { u.Id, u.UserName })
+);
+
+// Use SelectExpr only when you need SelectExpr-only features (runtime column names, If(...).As("Level"), etc.)
+var summary2 = await userService.SearchAsAsync<UserSummary>(
+    From(typeof(UserView))
         .Where(Prop("Age") >= 18)
         .Select("Id", "UserName")
 );
@@ -114,7 +122,7 @@ Important notes here:
 
 - `ObjectDAO<T>` handles entity write operations and itself **does not** have `Search(...)` query entry points.
 - `ObjectViewDAO<T>` exposes the broadest query surface, including `Search(...)`, `SearchAs(...)`, and `ExprString` entry points.
-- The Service query side also exposes `Search(...)`, plus `SearchAs(...)` / `SearchAsAsync(...)` based on `SelectExpr`, and IQueryable Lambda projections `SearchAs(...)` / `SearchOneAs(...)` / `SearchAsAsync(...)` / `SearchOneAsAsync(...)` for service-layer projections.
+- The Service query side also exposes `Search(...)`, plus `SearchAs(...)` / `SearchAsAsync(...)` based on `SelectExpr`, and the `IQueryable<T>` overloads `SearchAs(...)` / `SearchOneAs(...)` / `SearchAsAsync(...)` / `SearchOneAsAsync(...)` for service-layer projections. Start the chain with `Expr.From<T>()` and pass it straight in, or keep using the IQueryable Lambda form.
 - If you need both entity writes and view reads, you typically combine `ObjectDAO<T>` and `ObjectViewDAO<TView>` within a Service.
 
 ## When to Use Which
@@ -123,6 +131,30 @@ Important notes here:
 - Prefer using Service when transactions, auditing, or cross-table business encapsulation are needed.
 - When the read result structure differs significantly from the write entity structure, use a separate `TView`.
 - When you only need pure query encapsulation, start from `ObjectViewDAO<T>`.
+
+## How DAO splits reads and writes
+
+`DAOBase` does two things: turn "metadata plus expressions" into an executable command, and turn a reader into objects. It has two concrete implementations, one for reads and one for writes.
+
+|  | `ObjectDAO<T>` (write) | `ObjectViewDAO<T>` (read) |
+|:---|:---|:---|
+| Base properties | `IsView = false`, `SingleTable = true` | `IsView = true`, `Table` comes from `GetTableView` |
+| Main methods | `Insert` / `Update` / `Delete` / `UpdateOrInsert` / batch | `GetObject` / `Count` / `Exists*` / `Search` / `SearchAs` |
+| Statement building | `MakeInsertSql` / `MakeUpdateSql` / `MakeDeleteSql` | `MakeGetObjectSql` / `MakeObjectExistsSql` |
+| Command cache | `Insert` / `BatchInsert` always cached | Statements with a constant filter, and `GetObject` with a computed-column `Expr`, are rebuilt each time |
+
+The split exists because the two do genuinely different work. Writing assembles `INSERT`, `UPDATE`, `DELETE` and handles identity columns and timestamps. Reading assembles complex `SELECT` with JOIN and fills one object from multiple tables. Put both in a single class and every method ends up with runtime checks for "operation not supported here".
+
+Results are wrapped in lazy objects (`ResultTypes.cs`): the base is `CommandResult<T>`, `EnumerableResult<T>` is consumed with `ToList()` and `FirstOrDefault()`, and `ValueResult<T>` with `GetResult()`. When a result object is disposed it looks at where the command came from: cached commands are left alone, ones created for this call are released.
+
+## What Service adds on top of DAO
+
+`EntityService<T, TView>` (`EntityService.cs:58`) adds business semantics above DAO:
+
+- It resolves one `ObjectDAO<T>` during construction.
+- It raises `IEntityServiceEvent<T>` before and after every write; if any Before hook returns `false`, the operation is cancelled.
+- The subscriber collection is lazy (`:76`), so constructing the service does not touch the container. Resolution happens at the first notification.
+- If the entity implements `IArged`, operations are grouped by `TableArgs` automatically and routed to the matching shard.
 
 ## Related Links
 

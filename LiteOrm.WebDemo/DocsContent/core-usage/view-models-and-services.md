@@ -16,6 +16,8 @@ public class UserView : User
 
 这样查询 `UserView` 时，LiteOrm 能根据外键关系自动生成 JOIN。
 
+> 视图模型已经自带关联 JOIN，**不要再把视图作为 `Join` / `JoinRelated` 的查询源或右表**。显式多表连接请使用实体类型；需要按关联表过滤时使用 `ExistsRelated`。混用会导致视图的自动关联与显式连接重复，可能产生别名冲突或无法解析的列。
+
 `ForeignColumn` 支持声明自己的列级转换器：`[ForeignColumn(typeof(Department), Property = "Name", ConverterType = typeof(SomeValueConverter))]`。读取时**优先使用自身声明的 `ConverterType`，否则回退目标列的转换器**；`ConverterType` 用法与 `ColumnAttribute.ConverterType` 一致（提供实现 `IDbValueConverter` 的转换器类型）。
 
 外键列是否进 `SELECT` 只看属性可不可写：可写才有回填需求，读回来才有人接。写成只读属性（`=> ...`）时该列不进 `SELECT`，值由属性体自行计算。这条判定与目标列自身的定义无关，目标列是不可读的计算列也不影响本列取值（`ForeignColumnAttribute` 没有列模式参数，本来也没法在关联列上单独声明）。
@@ -74,14 +76,13 @@ public class UserWriteDao : ObjectDAO<User>
 ```
 
 ```csharp
-using static LiteOrm.Common.Expr;
 public class UserViewDao : ObjectViewDAO<UserView>
 {
     public UserViewDao(SessionManager sessionManager) : base(sessionManager) { }
 
     public Task<List<UserView>> GetActiveUsersAsync(CancellationToken cancellationToken = default)
     {
-        return Search(Prop("Age") >= 18).ToListAsync(cancellationToken);
+        return Search(u => u.Age >= 18).ToListAsync(cancellationToken);
     }
 }
 ```
@@ -103,8 +104,15 @@ public class UserService : EntityService<User>
 ```csharp
 using static LiteOrm.Common.Expr;
 
-var summary = await userService.SearchAsAsync<UserSummary>(
-    From<UserView>()
+// 首选：Lambda 投影
+var summary = await userService.SearchAsAsync(
+    q => q.Where(u => u.Age >= 18)
+          .Select(u => new { u.Id, u.UserName })
+);
+
+// 只有需要 SelectExpr 专属能力（按字符串动态选列、If(...).As("Level") 等）时，才改用它
+var summary2 = await userService.SearchAsAsync<UserSummary>(
+    From(typeof(UserView))
         .Where(Prop("Age") >= 18)
         .Select("Id", "UserName")
 );
@@ -114,7 +122,7 @@ var summary = await userService.SearchAsAsync<UserSummary>(
 
 - `ObjectDAO<T>` 负责实体写操作，本身**没有** `Search(...)` 查询入口。
 - `ObjectViewDAO<T>` 提供最完整的查询能力，包括 `Search(...)`、`SearchAs(...)` 以及 `ExprString` 入口。
-- Service 查询侧同样提供 `Search(...)`，并支持基于 `SelectExpr` 的 `SearchAs(...)` / `SearchAsAsync(...)`，以及 IQueryable Lambda 投影的 `SearchAs(...)` / `SearchOneAs(...)` / `SearchAsAsync(...)` / `SearchOneAsAsync(...)`，适合在服务层做结果投影。
+- Service 查询侧同样提供 `Search(...)`，并支持基于 `SelectExpr` 的 `SearchAs(...)` / `SearchAsAsync(...)`，以及接收 `IQueryable<T>` 的投影重载 `SearchAs(...)` / `SearchOneAs(...)` / `SearchAsAsync(...)` / `SearchOneAsAsync(...)`，适合在服务层做结果投影。查询可以用 `Expr.From<T>()` 起链后直接传入，也可以继续使用 IQueryable Lambda 形式。
 - 如果你既要写入实体，又要读取视图，通常会在 Service 里同时组合 `ObjectDAO<T>` 和 `ObjectViewDAO<TView>`。
 
 ## 什么时候该用哪一种
@@ -123,6 +131,30 @@ var summary = await userService.SearchAsAsync<UserSummary>(
 - 需要事务、审计、跨表业务封装时，优先使用 Service。
 - 读取结果与写入实体结构差异明显时，使用独立 `TView`。
 - 只想做纯查询封装时，优先从 `ObjectViewDAO<T>` 开始。
+
+## DAO 的读写分工
+
+`DAOBase` 干两件事：把"元数据 + 表达式"变成能执行的命令，再把读取器变成对象。它有两个具体实现，读一个写一个。
+
+|  | `ObjectDAO<T>`（写） | `ObjectViewDAO<T>`（读） |
+|:---|:---|:---|
+| 基类属性 | `IsView = false`，`SingleTable = true` | `IsView = true`，`Table` 取 `GetTableView` |
+| 主要方法 | `Insert` / `Update` / `Delete` / `UpdateOrInsert` / 批量 | `GetObject` / `Count` / `Exists*` / `Search` / `SearchAs` |
+| 语句构造 | `MakeInsertSql` / `MakeUpdateSql` / `MakeDeleteSql` | `MakeGetObjectSql` / `MakeObjectExistsSql` |
+| 命令缓存 | `Insert` / `BatchInsert` 恒缓存 | 带固定切片条件的语句、含计算列 `Expr` 的 `GetObject` 每次新建 |
+
+拆成两个类，是因为它们能做的事根本不一样。写要拼 `INSERT`、`UPDATE`、`DELETE`，还要处理自增列和时间戳；读要拼复杂的 `SELECT` 和 JOIN，还要把多表结果填进一个对象。硬塞进同一个类，方法里会到处是"当前操作不支持"的运行时判断。
+
+结果统一包成惰性对象（`ResultTypes.cs`）：基类 `CommandResult<T>`，`EnumerableResult<T>` 用 `ToList()` 和 `FirstOrDefault()` 取，`ValueResult<T>` 用 `GetResult()` 取。结果对象释放时看命令的来路，缓存里的不动，本次新建的才释放。
+
+## Service 在 DAO 之上加了什么
+
+`EntityService<T, TView>`（`EntityService.cs:58`）在 DAO 之上加业务语义：
+
+- 构造时解析出一个 `ObjectDAO<T>`；
+- 每次写操作前后触发 `IEntityServiceEvent<T>`，任何一个 Before 钩子返回 `false`，操作就取消；
+- 订阅者集合是惰性的（`:76`），构造服务时不碰容器，第一次要通知了才解析；
+- 实体实现了 `IArged` 的话，自动按 `TableArgs` 分组，走分表。
 
 ## 相关链接
 

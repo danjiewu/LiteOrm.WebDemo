@@ -2,6 +2,8 @@
 
 本文聚焦 LiteOrm 的写入、更新、删除和批量操作。查询能力请统一参考 [查询总览](./query-overview.md)。
 
+读这篇前先记住一件事：写操作在 `ObjectDAO<T>` 上，读操作在 `ObjectViewDAO<T>` 上，两个类不通用。下面所有示例都从写 DAO 出发。
+
 ## 1. 插入
 
 ### 单条插入
@@ -184,7 +186,47 @@ if (!updated)
 
 > 完整示例可参考 `LiteOrm.Tests\ObjectDAOTests.cs` 和 `LiteOrm.Tests\Models\TestTimestampUser.cs`。
 
-### 条件更新
+### 使用 Lambda 表达式更新（推荐）
+
+条件更新优先调用 `UpdateAll` / `UpdateAllAsync` 的 Lambda 扩展方法。它接受两个 Lambda 表达式：第一个定义“更新哪些字段、赋什么值”，第二个定义 `WHERE` 条件。框架内部会通过 `LambdaExprConverter` 自动转换为 `UpdateExpr`，因此写法更接近 EF Core，且具备编译期类型检查。
+
+```csharp
+// 等价于 UPDATE Users SET Age = 29 WHERE UserName = 'UpdateDemo_Alice'
+await userService.UpdateAllAsync(
+    u => new User { Age = 29 },
+    u => u.UserName == "UpdateDemo_Alice"
+);
+```
+
+更新表达式中还可以引用原实体字段参与运算（例如自增、字符串拼接），`WHERE` 条件也支持 `&&` / `||` 等逻辑组合：
+
+```csharp
+// 等价于 UPDATE Users SET Age = Age + 1, CreateTime = @now WHERE Age >= 28
+await userService.UpdateAllAsync(
+    u => new User { Age = u.Age + 1, CreateTime = DateTime.Now },
+    u => u.Age >= 28
+);
+```
+
+使用要点：
+
+- 第一个 Lambda 必须为 `Expression<Func<T, T>>`，且主体是 `new T { ... }` 形式的 `MemberInitExpression`，每个 `=` 绑定都会被翻译为一个 `SET` 子句。
+- 第二个 Lambda 为 `Expression<Func<T, bool>>`，即普通的 WHERE 条件，可以省略（不传 `whereExpression` 时表示更新全部记录，请谨慎使用）。
+- 引用原字段（如 `u.Age + 1`）会被翻译为 `Prop("Age") + Const(1)`，对应 SQL `Age = Age + 1`。
+- 还可以通过 `params string[] tableArgs` 传入动态表名参数。
+
+```csharp
+// 同步版本 + 动态表名
+userService.UpdateAll(
+    u => new User { Age = 30 },
+    u => u.UserName == "UpdateDemo_Bob",
+    "2026" // 表名参数，对应 [Table("Users_{0}")] 中的 {0}
+);
+```
+
+### 条件更新（Expr）
+
+`SET` 子句需要按运行时数据动态拼装时，再用 `UpdateExpr`：
 
 ```csharp
 using static LiteOrm.Common.Expr;
@@ -221,44 +263,6 @@ var rename = new UpdateExpr(new TableExpr(typeof(User)), Prop("UserName") == "Up
     .Set(("UserName", Func("CONCAT", Prop("UserName"), Const("_v2"))));
 ```
 
-### 使用 Lambda 表达式更新（推荐）
-
-如果不想手工拼 `UpdateExpr`，可以直接调用 `UpdateAll` / `UpdateAllAsync` 的 Lambda 扩展方法。它接受两个 Lambda 表达式：第一个定义“更新哪些字段、赋什么值”，第二个定义 `WHERE` 条件。框架内部会通过 `LambdaExprConverter` 自动转换为 `UpdateExpr`，因此写法更接近 EF Core，且具备编译期类型检查。
-
-```csharp
-// 等价于 UPDATE Users SET Age = 29 WHERE UserName = 'UpdateDemo_Alice'
-await userService.UpdateAllAsync(
-    u => new User { Age = 29 },
-    u => u.UserName == "UpdateDemo_Alice"
-);
-```
-
-更新表达式中还可以引用原实体字段参与运算（例如自增、字符串拼接），`WHERE` 条件也支持 `&&` / `||` 等逻辑组合：
-
-```csharp
-// 等价于 UPDATE Users SET Age = Age + 1, CreateTime = @now WHERE Age >= 28
-await userService.UpdateAllAsync(
-    u => new User { Age = u.Age + 1, CreateTime = DateTime.Now },
-    u => u.Age >= 28
-);
-```
-
-使用要点：
-
-- 第一个 Lambda 必须为 `Expression<Func<T, T>>`，且主体是 `new T { ... }` 形式的 `MemberInitExpression`，每个 `=` 绑定都会被翻译为一个 `SET` 子句。
-- 第二个 Lambda 为 `Expression<Func<T, bool>>`，即普通的 WHERE 条件，可以省略（不传 `whereExpression` 时表示更新全部记录，请谨慎使用）。
-- 引用原字段（如 `u.Age + 1`）会被翻译为 `Prop("Age") + Const(1)`，对应 SQL `Age = Age + 1`。
-- 还可以通过 `params string[] tableArgs` 传入动态表名参数。
-
-```csharp
-// 同步版本 + 动态表名
-userService.UpdateAll(
-    u => new User { Age = 30 },
-    u => u.UserName == "UpdateDemo_Bob",
-    "2026" // 表名参数，对应 [Table("Users_{0}")] 中的 {0}
-);
-```
-
 ## 3. 删除
 
 ### 根据实体删除
@@ -286,7 +290,6 @@ await userService.BatchDeleteIDAsync(new[] { 1, 2, 3 });
 一组适合复制的闭环验证：
 
 ```csharp
-using static LiteOrm.Common.Expr;
 var users = new List<TestUser>
 {
     new TestUser { Name = "Batch 1", Age = 10, CreateTime = DateTime.Now },
@@ -295,7 +298,7 @@ var users = new List<TestUser>
 
 await service.BatchInsertAsync(users);
 
-var inserted = await viewService.SearchAsync(Lambda<TestUser>(u => u.Name!.StartsWith("Batch")));
+var inserted = await viewService.SearchAsync(u => u.Name!.StartsWith("Batch"));
 
 foreach (var user in inserted)
     user.Age += 5;
@@ -384,6 +387,36 @@ await service.BatchAsync(ops);
 - 高频写入场景优先考虑批量接口。
 - 需要显式控制 SQL 结构时，可使用 `Expr.Update<T>()` 和 DAO。
 - 跨多表业务操作建议放到 Service 中并配合事务。
+
+## 8. 一次写入内部走了哪些路
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as 调用方
+    participant O as ObjectDAO#lt;T#gt;
+    participant X as SqlBuilder
+    participant D as DAOContext
+    participant N as 数据源
+
+    C->>O: Insert(entity) / Update / Delete
+    O->>O: MakeInsertSql（含 ConstFilter 注入）
+    O->>O: GetPreparedCommand(useCache)
+    O->>X: ToParamName / ToSqlName / ToDbType
+    X-->>O: 方言化 SQL 与参数名
+    O->>D: 绑定 Param 值（DbWriteConverter）
+    D->>N: DbCommandProxy.ExecuteNonQuery（获取作用域、挂事务）
+    N-->>D: 受影响行数
+    D-->>C: bool / int
+```
+
+1. 造写语句。 `MakeInsertSql` / `MakeUpdateSql` / `MakeDeleteSql` 用 `ValueStringBuilder` 拼装，顺手注入固定切片条件。
+2. 取命令。 `Insert` 和 `BatchInsert` 恒用缓存命令；带固定切片条件的更新、删除与主键路径每次新建，免得把缓存里的可复用命令搞脏。
+3. 绑参数。 `SetupCommand` 生成 `DbParameter`，按 `DbValueType` 定 `DbType`，该转值的转值。
+4. 执行。 `DbCommandProxy.ExecuteNonQuery` 获取上下文作用域，挂上当前事务。
+5. 返回。 单条给 `bool`，条件批量给受影响行数 `int`。
+
+读写分工上，`ObjectDAO<T>` 只管写，`ObjectViewDAO<T>` 只管读，两者都继承 `DAOBase`；详见 [视图模型与服务定义](./view-models-and-services.md#dao-的读写分工)。
 
 ## 相关链接
 

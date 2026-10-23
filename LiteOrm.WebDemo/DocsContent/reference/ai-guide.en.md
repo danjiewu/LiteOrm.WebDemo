@@ -121,15 +121,16 @@ Types marked with `[AutoRegister]` are automatically registered into the DI cont
 
 | Build mode | Registration method | Notes |
 | --- | --- | --- |
-| AOT / trim (`PublishAot` / `IsAotCompatible` / `PublishTrimmed` etc. set to `true`) | Compile-time source generator (`LiteOrm.Generators.AutoRegisterGenerator`) | Emits `LiteOrmAutoRegister.g.cs`; a module initializer registers the callback. No reflection, AOT-friendly |
+| AOT / trim (`PublishAot` / `IsAotCompatible` / `PublishTrimmed` etc. set to `true`) | Compile-time source generator (`LiteOrm.Generators.AutoRegisterGenerator`) | Emits registration code; a module initializer hooks it up. No reflection |
 | Non-AOT (default) | Runtime assembly scan | `LiteOrmAutoRegistration.Apply()` reflects over referenced assemblies for `[AutoRegister]` types |
 
-- The `AutoRegisterServices` option (default `true`) only governs auto-registration of **user-defined** services and DAOs: AOT mode applies the source-generated registration code, non-AOT mode scans assemblies at runtime; set to `false` to skip that and register custom services manually.
+- The `AutoRegisterServices` option (default `true`) only governs auto-registration of **user-defined** services and DAOs; the two methods are dispatched automatically via `RuntimeFeature.IsDynamicCodeSupported`. Set to `false` to skip that and register custom services manually.
 - The framework's built-in generic DAOs and services (`ObjectDAO<>` / `ObjectViewDAO<>` / `EntityService<>` / `EntityViewService<>` and their interfaces) are unaffected by this option — they are always registered by `AddLiteOrm()` and remain available even when `AutoRegisterServices` is `false`.
 - The registration scope is controlled by the `Policy` enum `RegisterPolicy` on `[AutoRegister]`: `All` (default — the implementation type itself + interfaces), `Self` (itself only), `Interface` (interfaces only).
-- `AddLiteOrm()`: applies generated code in AOT mode, runtime scan in non-AOT mode (auto-dispatched via `RuntimeFeature.IsDynamicCodeSupported`).
 - `RegisterLiteOrm()`: Autofac assembly-scan registration; automatically applies Castle interceptors from `[InterceptAttribute]`, the `IEntityService` interface family, and types carrying `[Service]` (`IsService=true`) via `ServiceInvokeInterceptor`.
 - Source generation is enabled automatically under an AOT build; to generate it in an ordinary build too (for example, to validate AOT compatibility early), declare `[assembly: LiteOrmCodeGen]` (`LiteOrmCodeGenAttribute`) on the assembly.
+
+For the full checklist under an AOT build — DI wiring, association metadata, constant slices, converter declarations — see [NativeAOT Support](../advanced-topics/aot.en.md).
 
 ## 2. Entity and view definitions
 
@@ -163,6 +164,7 @@ public class UserView : User
 | `Name` | Database table name, supports placeholder for sharding. |
 | `DataSource` | Specifies the data source for the current entity. |
 | `SyncTable` | Entity-level table-structure sync mode, enum `SyncTableMode` (`Default` / `Never` / `Always`), defaults to `Default`. `Never`/`Always` overrides the data-source-level `SyncTable` config. |
+| `AutoGenerateColumns` | Whether to auto-generate columns for properties without a `[Column]`, defaults to `true`. When set to `false`, only properties explicitly marked with `[Column]` are mapped as columns and unmarked ones are ignored; `[ForeignColumn]` is unaffected. |
 
 ```csharp
 [Table("Logs", SyncTable = SyncTableMode.Always)] // Always auto-create, even when the data source has SyncTable=false
@@ -262,26 +264,34 @@ public class UserService : EntityService<User, UserView>, IUserService { }
 
 | Method | Return type |
 | --- | --- |
-| `Delete(Expression<Func<T, bool>> expression, params string[] tableArgs)` | `int` |
-| `DeleteAsync(Expression<Func<T, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<int>` |
+| `DeleteAll(Expression<Func<T, bool>> expression, params string[] tableArgs)` | `int` |
+| `DeleteAllAsync(Expression<Func<T, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<int>` |
 | `Search(Expression<Func<TView, bool>> expression, string[] tableArgs = null)` | `List<TView>` |
 | `Search(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null)` | `List<TView>` |
+| `Search(IQueryable<TView> query, string[] tableArgs = null)` | `List<TView>` |
 | `SearchOne(Expression<Func<TView, bool>> expression, string[] tableArgs = null)` | `TView` |
 | `SearchOne(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null)` | `TView` |
+| `SearchOne(IQueryable<TView> query, string[] tableArgs = null)` | `TView` |
 | `Exists(Expression<Func<TView, bool>> expression, params string[] tableArgs)` | `bool` |
 | `Count(Expression<Func<TView, bool>> expression, params string[] tableArgs)` | `int` |
 | `SearchAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<List<TView>>` |
 | `SearchAsync(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<List<TView>>` |
+| `SearchAsync(IQueryable<TView> query, string[] tableArgs = null, CancellationToken ct = default)` | `Task<List<TView>>` |
 | `SearchOneAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TView>` |
 | `SearchOneAsync(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TView>` |
+| `SearchOneAsync(IQueryable<TView> query, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TView>` |
 | `ExistsAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<bool>` |
 | `CountAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<int>` |
 | `SearchAs(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)` | `List<TResult>` |
+| `SearchAs(IQueryable<TResult> query, string[] tableArgs = null)` | `List<TResult>` |
 | `SearchOneAs(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)` | `TResult` |
-| `SearchAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)` | `Task<List<TResult>>` |
-| `SearchOneAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)` | `Task<TResult>` |
+| `SearchOneAs(IQueryable<TResult> query, string[] tableArgs = null)` | `TResult` |
+| `SearchAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<List<TResult>>` |
+| `SearchAsAsync(IQueryable<TResult> query, string[] tableArgs = null, CancellationToken ct = default)` | `Task<List<TResult>>` |
+| `SearchOneAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TResult>` |
+| `SearchOneAsAsync(IQueryable<TResult> query, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TResult>` |
 
-> Additional note: Service query APIs include the `Expr` overloads, these Lambda extensions (including the `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync` projections), and `SearchAs(...)` / `SearchAsAsync(...)` based on `SelectExpr`. If you need `ExprString`, full SQL, or DataTable-oriented queries, switch to DAO.
+> Additional note: Service query APIs include the `Expr` overloads, these Lambda extensions (including the `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync` projections), the `IQueryable<T>` overloads, and `SearchAs(...)` / `SearchAsAsync(...)` based on `SelectExpr`; `Expr.Query` and the IQueryable Lambda form both remain available. If you need `ExprString`, full SQL, or DataTable-oriented queries, switch to DAO.
 
 ### ObjectDAO<T> (create, update, delete only)
 
@@ -320,9 +330,11 @@ public class UserService : EntityService<User, UserView>, IUserService { }
 | --- | --- |
 | `Search(Expr expr = null)` | `EnumerableResult<T>` |
 | `Search(Expression<Func<IQueryable<T>, IQueryable<T>>> expr)` | `EnumerableResult<T>` |
+| `Search(IQueryable<T> query)` | `EnumerableResult<T>` |
 | `Search(ref ExprString sqlBody, bool isFull = false)` | `EnumerableResult<T>` |
-| `SearchAs<TResult>(SelectExpr selectExpr, Func<DbDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
-| `SearchAs<TResult>(Expression<Func<IQueryable<T>, IQueryable<TResult>>> expr, Func<DbDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
+| `SearchAs<TResult>(SelectExpr selectExpr, Func<AutoLockDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
+| `SearchAs<TResult>(Expression<Func<IQueryable<T>, IQueryable<TResult>>> expr, Func<AutoLockDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
+| `SearchAs<TResult>(IQueryable<TResult> query, Func<AutoLockDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
 | `SearchAs<TResult>(ref ExprString sqlBody)` | `EnumerableResult<TResult>` |
 | `GetObject(params object[] keys)` | `EnumerableResult<T>` |
 | `Count(Expr expr)` | `ValueResult<int>` |
@@ -339,6 +351,8 @@ public class UserService : EntityService<User, UserView>, IUserService { }
 | `Search(Expr expr)` | `DataTableResult` |
 | `Search(string[] propertyNames, Expr expr)` | `DataTableResult` |
 | `Search(ref ExprString sqlBody, bool isFull = false)` | `DataTableResult` |
+| `Search<TInput, TResult>(IQueryable<TResult> query)` (extension) | `DataTableResult` |
+| `Search<TInput, TResult>(string[] propertyNames, IQueryable<TResult> query)` (extension) | `DataTableResult` |
 
 ### DataDAO<T> (column-value bulk update)
 
@@ -466,8 +480,8 @@ Event subscribers are resolved lazily: constructing an entity service instance n
 
 | Style | Suitable for |
 | --- | --- |
-| Lambda expression `u => u.Age > 18` | Simple conditions with compile-time type safety |
-| Expr object (operators / fluent methods) | Complex conditions, dynamically accumulated conditions, and chained queries |
+| Lambda expression `u => u.Age > 18` | Regular fixed conditions (preferred) with compile-time type safety |
+| Expr object (operators / fluent methods) | Dynamically accumulated conditions, cross-layer reuse, and Expr-only capabilities |
 | ExprString interpolated string | Condition fragments or full SQL inside custom DAOs |
 
 ### Expr static factory methods
@@ -482,7 +496,12 @@ Event subscribers are resolved lazily: constructing an entity service instance n
 | `Expr.Aggregate("SUM", expr, isDistinct)` | `FunctionExpr` | Aggregate function (`IsAggregate=true`) |
 | `Expr.Concat(e1, e2)` | `ValueSet` | CONCAT string composition (extension method) |
 | `Expr.Lambda<T>(u => u.Age > 18)` | `LogicExpr` | Converts Lambda to Expr |
-| `Expr.From<T>(tableArgs)` | `FromExpr` | Starting point for chained queries |
+| `Expr.From(type, tableArgs)` | `TableExpr` | Builds a chained-query starting point from a `Type`; use `Expr.From<T>()` for a `QuerySource<T>` |
+| `Expr.From<T>(tableArgs)` | `QuerySource<T>` | Builds a query source; handled by the lambda parser inside a lambda, composes IQueryable queries outside it, needs an executor to run |
+| `Expr.From<T>()...GetQueryExpr()` | `Expr` | Turns a composed IQueryable chain into an Expr, no executor needed |
+| `QuerySource<T1>.Join<T2>(on)` / `JoinRelated<T2>()` | `QuerySource<T1, T2>` | Joins one right table and returns a query source whose element is `(T1, T2)` |
+| `QuerySource<T1,...,Tn>.Join<Tn+1>(on)` / `JoinRelated<Tn+1>()` | `QuerySource<T1,...,Tn+1>` | Appends one right table per call, chaining up to seven elements; the tuple stays flat and each step names only the new right table |
+| `IQueryable<T>.AsSource()` | `QuerySource<T>` | Narrows the `IQueryable<T>` static type back to the query source for async methods |
 | `Expr.Sql("key", arg)` | `GenericSqlExpr` | Dynamic SQL fragment |
 | `Expr.Delete<T>(tableArgs)` | `DeleteExpr` | Creates a DELETE expression |
 | `Expr.If(condition, thenExpr, elseExpr)` | `FunctionExpr` | IF expression |
@@ -491,12 +510,13 @@ Event subscribers are resolved lazily: constructing an entity service instance n
 | `Expr.Case(params Expr[])` | `FunctionExpr` | CASE expression (alternating argument form) |
 | `Expr.Query<T>(expression)` | `Expr` | Converts an IQueryable Lambda to Expr |
 | `Expr.Query<T, TResult>(expression)` | `Expr` | Converts an IQueryable Lambda with a return value to Expr |
-| `Expr.Exists<T>(innerExpr, tableArgs)` | `ForeignExpr` | EXISTS query on a related table |
-| `Expr.Exists(type, innerExpr, tableArgs)` | `ForeignExpr` | EXISTS query on a related table (explicit type) |
-| `Expr.ExistsRelated<T>(innerExpr, tableArgs)` | `ForeignExpr` | EXISTS query using automatic relation discovery |
-| `Expr.ExistsRelated(type, innerExpr, tableArgs)` | `ForeignExpr` | EXISTS query using automatic relation discovery (explicit type) |
+| `Expr.Exists(type, innerExpr, tableArgs)` | `ForeignExpr` | EXISTS query on a related table |
+| `Expr.ExistsRelated(type, innerExpr, tableArgs)` | `ForeignExpr` | EXISTS query using automatic relation discovery |
 | `Expr.Exists<T>(lambda)` | `bool` | Used only inside Lambda expressions to build EXISTS queries (direct calls throw an exception) |
 | `Expr.ExistsRelated<T>(lambda)` | `bool` | Used only inside Lambda expressions to build automatic-related EXISTS queries (direct calls throw an exception) |
+| `Expr.FromRelated<T>(tableArgs)` | `QuerySource<T>` | Same as `Expr.From<T>()`, plus the automatic relation condition inside a lambda |
+
+> `Join` / `JoinRelated` are intended for entity tables only. View models already generate association JOINs through `[ForeignColumn]`; do not mix them with views. Use entity types for explicit multi-table joins and `ExistsRelated` for related-table filtering.
 
 Additional rule:
 
@@ -574,7 +594,7 @@ Additional notes:
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var query = From<User>()
+var query = From(typeof(User))
     .Where(Prop("Age") > 18)                         // WhereExpr
     .SelectAll()                                     // SelectExpr, equivalent to SELECT *
     .Where(Prop("Status") == 1)
@@ -586,7 +606,7 @@ You can also explicitly project selected fields when needed:
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var query = From<User>()
+var query = From(typeof(User))
     .Where(Prop("Age") > 18)                         // WhereExpr
     .GroupBy(Prop("DeptId"))                         // GroupByExpr
     .Having(Prop("Id").Count() > 5)                  // HavingExpr
@@ -601,7 +621,7 @@ var query = From<User>()
 ```csharp
 using static LiteOrm.Common.Expr;
 // IN subquery
-var subQuery = From<Department>()
+var subQuery = From(typeof(Department))
     .Where(Prop("Name") == "IT")
     .Select("Id");
 var expr = Prop("DeptId").In(subQuery);
@@ -611,10 +631,10 @@ UpdateExpr / DeleteExpr (used by `ObjectDAO.Delete(LogicExpr)` / `ObjectDAO.Upda
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var update = new UpdateExpr(From<User>(), Prop("Id") == 1);
+var update = new UpdateExpr(From(typeof(User)), Prop("Id") == 1);
 update.Set(("UserName", Value("NewName")), ("Age", Value(30)));
 
-var delete = new DeleteExpr(From<User>(), Prop("Age") < 18);
+var delete = new DeleteExpr(From(typeof(User)), Prop("Age") < 18);
 ```
 
 ### ExprString
@@ -697,9 +717,16 @@ var expr = Exists<Department>(Prop("Name") == "IT");
 // Equivalent Lambda form (inside a Lambda query):
 var expr = Lambda<User>(u => Exists<Department>(d => d.Name == "IT"));
 
-// SearchAs selects a subset of fields
+// SearchAs selects a subset of fields (prefer Lambda projection)
 var result = dao.SearchAs(
     From<User>()
+        .Where(u => u.Age > 18)
+        .Select(u => new { u.Id, u.UserName })
+).ToList();
+
+// Use SelectExpr only when you need SelectExpr-only features (runtime column names, If(...).As("Level"), etc.)
+var result2 = dao.SearchAs(
+    From(typeof(User))
         .Where(Prop("Age") > 18)
         .Select("Id", "UserName")
 ).ToList();

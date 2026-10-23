@@ -2,6 +2,8 @@
 
 本文档介绍 LiteOrm 的关联查询能力。
 
+读这篇前先弄清两个词：`ForeignType` 标在单个外键列上，`TableJoin` 标在类上，两者都能建关联，差别只在声明位置。拿不准用哪个时，先看外键是不是只有一列。
+
 - 涵盖 TableJoin（类级）与 ForeignType（属性级）的使用。
 - 说明 ForeignColumn 的取值方式、AutoExpand 的作用与常见实践。
 
@@ -169,7 +171,7 @@ public class SalesRecordView : SalesRecord
 - 注意：AutoExpand 的核心作用是“让下一层关联路径可被继续解析”。<br/>
   实际是否生成更多 JOIN，仍然取决于查询里是否真的引用了这些路径上的字段或条件。
 
-### 2.4.1 AutoExpand 开关对比
+#### 2.4.1 AutoExpand 开关对比
 
 | 场景 | `AutoExpand = false` | `AutoExpand = true` |
 |------|----------------------|---------------------|
@@ -250,7 +252,7 @@ var combinedUsers = await viewService.SearchAsync(
 );
 ```
 
-### 2.7.1 关联字段排序与分页
+#### 2.7.1 关联字段排序与分页
 
 LiteOrm 会先按依赖关系对 `TableView` 中的关联表做拓扑排序，再生成 JOIN。
 当某个关联表依赖另一个关联表时，SQL 中的连接顺序会自动稳定下来，关联字段排序、分页和多级过滤通常不再需要手动调整 JOIN 先后。
@@ -259,8 +261,8 @@ LiteOrm 会先按依赖关系对 `TableView` 中的关联表做拓扑排序，�
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var expr1 = From<TestUserView>()
-    .Where<TestUserView>(u => u.DeptName != null)
+var expr1 = From(typeof(TestUserView))
+    .Where(Lambda<TestUserView>(u => u.DeptName != null))
     .OrderBy((nameof(TestUserView.DeptName), true))
     .OrderBy((nameof(TestUser.Age), false))
     .Section(0, 3);
@@ -272,8 +274,8 @@ var users1 = await viewService.SearchAsync(expr1);
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var expr2 = From<TestUserView>()
-    .Where<TestUserView>(u => u.ParentDeptName == "Parent Dept")
+var expr2 = From(typeof(TestUserView))
+    .Where(Lambda<TestUserView>(u => u.ParentDeptName == "Parent Dept"))
     .OrderBy(nameof(TestUserView.ParentDeptName))
     .OrderBy(nameof(TestUserView.DeptName))
     .OrderBy(nameof(TestUser.Age))
@@ -302,7 +304,7 @@ var users2 = await viewService.SearchAsync(expr2);
 1. **正向关联优先**：首先尝试从主表出发的外键关联（如 `Order.UserId -> User.Id`）
 2. **反向关联备选**：若主表上没有到目标类型的正向关联，则尝试从目标表反向推断（如 `User.DeptId -> Department.Id`）
 
-这里的“匹配”不是按属性名字符串硬编码比较，而是按模型元数据里的已声明关联来找：
+这里的“匹配”按模型元数据里已声明的关联来找，不按属性名字符串硬编码比较：
 
 - 先遍历当前作用域主表的关联表 `JoinedTables`
 - 找出已声明 `ForeignType` / `TableJoin` 的 `DefinitionType` 能够接收 `ExistsRelated<T>` 目标类型的关联，也就是**只匹配声明类型本身及其子类**
@@ -378,6 +380,18 @@ var matureItUsers = await objectViewDAO.Search(
 
 > `ForeignColumnAttribute.ConverterType` 指定该外键投影列自己的列级转换器；读取时**优先使用自身声明的转换器，否则回退目标列的转换器**（目标列本身也可为 `ForeignColumn`，支持逐层回退）。用法与 `ColumnAttribute.ConverterType` 一致：提供一个实现 `IDbValueConverter` 的转换器类型。
 
+上面这些元数据不只服务于 `ExistsRelated`，也决定了三个关联查询入口的行为：
+
+| 入口 | 位置 | 关联条件的落点 |
+|------|------|----------------|
+| `ExistsRelated` | WHERE 条件 | 生成的 `EXISTS(...)` 子查询内层 |
+| `FromRelated<T>` | Lambda 查询源 | 解析成 `WhereExpr`，作为该表的过滤条件 |
+| `JoinRelated<T2>` | Lambda 连接（`From<T1>().JoinRelated<T2>()`） | 解析成 `TableJoinExpr.On` |
+
+三者共用同一套推断逻辑，实现是 `Expr.BuildRelatedLogic(rootType, rootAlias, foreignType, foreignAlias)`：先看主表的 `JoinedTables` 里有没有目标类型，找不到再反向查目标表的 `JoinedTables`。推断不到时 `ExistsRelated` 与 `FromRelated` 退化为不带关联条件的写法，`JoinRelated` 则直接抛异常，提示改用带显式条件的 `Join`。需要自己拼关联条件时可以直接调用这个方法，返回的是一段带表别名的 `LogicExpr`。
+
+`JoinRelated` 在已有连接链上追加表时，会按关联顺序**从后向前**选择推断的起点：先尝试最近一次连接的表，再逐级向前回退，最后才使用主表。因此 `From<Order>().JoinRelated<User>().JoinRelated<Dept>()` 会用 `User` 到 `Dept` 的关系，而不是要求 `Order` 与 `Dept` 直接相关。
+
 实现上，LiteOrm 会在元数据阶段合并 ForeignType 与 TableJoin 的信息，生成 JoinedTable / ForeignTable 结构。固定筛选相关的元数据与 SQL 注入细节，见[权限过滤与用户范围控制](../advanced-topics/permission-filtering.md)。
 
 ---
@@ -388,6 +402,7 @@ var matureItUsers = await objectViewDAO.Search(
 - 复合键、联合主键或需要复用的连接：使用 TableJoin 在类型上预定义，避免在多个视图重复声明。
 - AutoExpand：仅对稳定、明确、可预期的级联路径开启。若同一目标表存在多条关系，请优先显式建模并谨慎使用。
 - Alias：使用 Alias/AliasName 避免列名冲突，视图中只声明必要的外表列以减少网络传输。
+- Join 与 View 不要混用：视图的 `[ForeignColumn]` 已经负责关联 JOIN，不要再把视图作为 `Join` / `JoinRelated` 的查询源或右表；显式多表连接使用实体类型，按关联表过滤使用 `ExistsRelated`。
 - 性能验证：对复杂视图在生产前审查生成的 SQL，并用数据库执行计划（EXPLAIN）检查索引与连接顺序。
 
 ---

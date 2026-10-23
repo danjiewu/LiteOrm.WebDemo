@@ -112,7 +112,7 @@ graph TD
 ```
 
 要点：
-- **读取方法由列的 DbValueType 决定**（第一步）：框架先把列解析为 `DbValueType`（由**该数据库 Builder 的 `GetDbValueType(属性类型)`** 给出），再映射为 `DbType` 并据此选择类型化读取方法——`String→GetString`、`Binary→GetBytes`、`Int32→GetInt32`…进而决定送入转换器的原始值类型。因此**列的 DbValueType 必须与列实际存储类型一致，否则会调错 Get 方法**（场景见 [6.3 VARBINARY 示例](#63-某数据库需要覆盖)）。
+- **读取方法由列的 DbValueType 决定**（第一步）：框架先把列解析为 `DbValueType`（由**该数据库 Builder 的 `GetDbValueType(属性类型)`** 给出），再映射为 `DbType` 并据此选择类型化读取方法：`String→GetString`、`Binary→GetBytes`、`Int32→GetInt32`…进而决定送入转换器的原始值类型。因此**列的 DbValueType 必须与列实际存储类型一致，否则会调错 Get 方法**（场景见 [6.3 VARBINARY 示例](#63-某数据库需要覆盖)）。
 - **空值独立于转换器处理**：可空类型/引用类型得 `null`，非可空值类型得该类型的零值（`default`）。转换委托本身不处理 null。
 - **转换器的输入类型**（`TDbType`）必须与第一步选定的 Get 方法返回类型对齐（如 `Binary→byte[]`、`String→string`），这样读到原始值后能直接命中强类型委托、避免运行时桥接。
 
@@ -157,11 +157,11 @@ graph TD
 
 ### 2.5 注册目标与作用域（RegisterDbValueConverter）
 
-`RegisterDbValueConverter` 是扩展方法，**它按泛型参数 `T` 声明的 SqlBuilder 类型进行注册，与传入的实例无关**（实例只用于调用，真正的落点是 `T` 对应的那张注册表）。因此用哪个实例调用不影响结果，关键是 `T` 选谁：
+`RegisterDbValueConverter` 是扩展方法，**它按泛型参数 `T` 声明的 SqlBuilder 类型进行注册，与传入的实例无关**（实例只用于调用，落点是 `T` 对应的那张注册表）。因此用哪个实例调用不影响结果，关键是 `T` 选谁：
 
 | 用 `T` 指定 | 注册到 | 作用域 |
 |------------|--------|--------|
-| `SqlBuilder`（基类） | SqlBuilder 基类注册表 | **所有数据库的保底**——任何方言沿继承链都能命中，除非方言自带了同 key 的覆盖 |
+| `SqlBuilder`（基类） | SqlBuilder 基类注册表 | **所有数据库的保底**，任何方言沿继承链都能命中，除非方言自带了同 key 的覆盖 |
 | 某方言子类（`MySqlBuilder` 等） | 该方言独立注册表 | 仅该方言生效，会覆盖基类对同 key 的注册 |
 
 所以，要让一个自定义转换器对所有数据库生效，**只需注册一次到基类**：
@@ -212,9 +212,11 @@ SqlBuilder.Instance.RegisterDbValueConverter<SqlBuilder, TDbType, TValueType>(
 - **Lambda 查询**：支持索引器和 `GetValue<T>()` 直接查询 JSON 字段，详见 [Lambda 查询指南](../core-usage/lambda-guide.md#7-jsonnode-查询)。
 - **Expr 表达式**：支持 `JsonExtract`、`JsonValue`、`JsonQuery`、`JsonContains`、`JsonObject`、`JsonArray`、`IsJson` 等函数，详见 [表达式扩展](../extensibility/expression-extension.md#9-json-函数扩展)。
 
+> 用自定义类承载 JSON 而不是 `JsonNode` 时，注册读写转换器、把类字段映射为 JSON 函数、按字段过滤的完整走法见[对象的 JSON 列存储与字段查询](../typical-applications/json-column-mapping.md)。
+
 ## 4. 列级转换器
 
-当某**个别列**需要特殊类型（如枚举、自定义值对象）时，用列级转换器最简单——它优先级最高，只影响这一列。
+当某**个别列**需要特殊类型（如枚举、自定义值对象）时，用列级转换器最简单，它优先级最高，只影响这一列。
 
 ### 4.1 两种指定方式
 
@@ -235,16 +237,16 @@ Mapper 把数据库返回的行逐列填充到实体对象，它决定"读方向
 
 | 路径 | 触发条件 | 机制 | 性能 |
 |------|---------|------|------|
-| **源生成器预注册** | 实体标注 `[Table]` | 编译期生成静态逐列赋值代码并注册 | 最高 |
-| **JIT 表达式树编译** | 运行时支持动态代码 | 动态编译映射委托 | 最高 |
-| **AOT 反射映射** | NativeAOT（无动态代码） | 反射赋值 | 中等 |
+| **源生成器预注册** | AOT 构建 + 实体标注 `[Table]` | 编译期生成静态逐列赋值代码并注册 | 最高 |
+| **JIT 表达式树编译** | 非 AOT 构建 | 动态编译映射委托 | 最高 |
+| **AOT 反射映射** | NativeAOT 下没有生成代码的类型 | 反射赋值 | 中等 |
 
 三者的行为一致：逐列做 `IsDBNull` 判定 → 取该列转换器 / 类型化读取 → 赋给实体属性。差异仅在"用什么方式执行"：
-- **JIT 路径**：用类型化读取方法（`GetInt32`/`GetString`…）避免装箱；命中列转换器时把强类型委托内联进编译好的代码；按类型和按列架构做双层缓存。
-- **AOT 路径**：统一 `GetValue()` 读取（返回 `object`）再经非泛型委托或 `ChangeType` 桥接；构建期无法预判数据库某列实际返回的 CLR 类型，没法按 `DbType` 选 `GetInt32` / `GetString`，**装箱不可避免**；标注 `[Table]` 的实体走源生成器预注册路径，性能仍高于纯反射路径，但低于 JIT。
-- **源生成器路径**：以 `[Table]` 实体为目标，无反射，但读取统一走 `GetValue()`（返回 `object`）加非泛型转换器委托；**装箱免不掉**。
+- **JIT 路径**：用类型化读取方法（`GetInt32`/`GetString`…）避免装箱；命中列转换器时把强类型委托内联进编译好的代码。
+- **源生成器路径**：没有转换器的列直接类型化读取，不装箱；命中列级转换器的列走 `GetValue()` 加非泛型委托，只有这些列装箱。
+- **AOT 反射路径**：统一 `GetValue()` 加 `SetValue`，每列都装箱，另加反射调用开销。
 
-> 选择建议：常规运行时代码可以放心依赖 JIT 路径；在 NativeAOT 发布时，请确保实体标注 `[Table]` 以命中源生成器实现，但仍需了解 AOT 路径下的装箱开销高于 JIT。
+> 选择建议：发布到 NativeAOT 时给实体标注 `[Table]`，命中源生成器路径；投影与匿名类型在 AOT 下走反射路径。两种模式的完整对比见 [NativeAOT 支持](./aot.md)。
 
 ### 5.1 实体跨数据源动态切换时的读取映射
 
@@ -253,7 +255,7 @@ Mapper 把数据库返回的行逐列填充到实体对象，它决定"读方向
 > 也就是说，**一个实体只能缓存一份读取委托，这份委托由它第一次被哪个数据源绑定而决定**。因此，当同一个实体被绑定到多个**可动态切换**的数据源（例如按租户 / 分片在 SQLite / MySQL / Oracle 间切换）时，必须满足其一，否则会因复用旧数据源编译出的 mapper 而读错列：
 
 1. **保证各数据源下该实体列的 `DbValueType` 一致**。例如 SQLite 把 `DateTime` 存成文本、MySQL 存成原生 `DATETIME`，若实体先在 SQLite 编译出调用 `GetString` 再解析的 mapper，切到 MySQL 后同一 mapper 拿到的是 `DATETIME` 原始值，强转 / 解析便会失败。想让同一实体跨库稳定，需让列在各库采用相同类型约定；否则建议为不同数据源使用**专属实体**（不同实体各自独立缓存，互不污染）。
-2. **难以保持一致时，手动预注册读取委托**——通过 `DataReaderConverter.RegisterMapper<T>` 在启动期固定该实体的映射规则。缓存命中预注册后，就不再"由某个数据源方言动态编译"，也就从根本上避免了跨源脏缓存：
+2. **难以保持一致时，手动预注册读取委托**：通过 `DataReaderConverter.RegisterMapper<T>` 在启动期固定该实体的映射规则。缓存命中预注册后，就不再"由某个数据源方言动态编译"，也就从根本上避免了跨源脏缓存：
 
 ```csharp
 DataReaderConverter.RegisterMapper<Order>(
@@ -268,7 +270,7 @@ DataReaderConverter.RegisterMapper<Order>(
     });
 ```
 
-> 说明：`AutoLockDataReader` 提供与 `DbDataReader` 一致的类型化读取方法，列序号对应 `GetConverterByTable` 的按表列位置映射（`SelectColumns` 顺序，从 0 开始）。在手动 mapper 里，**读取方法不能仅凭字段声明的 .NET 类型写死**，应在运行时用 `GetFieldType(i)` 探测数据库实际返回的类型，再分支到对应的类型化 Get 方法——正如示例对 `CreateTime` 的处理（返回文本 → `GetString` + 解析；返回原生 DATETIME → `GetDateTime`）；这其实正是框架 JIT 路径在编译期按列 `DbValueType → DbType` 所做的选择。`RegisterMapper<T>` 主要为 NativeAOT 提供无反射的预注册路径，但同样适用于"实体跨数据源动态切换"场景，作为显式、确定性的读取规则。
+> 说明：`AutoLockDataReader` 提供与 `DbDataReader` 一致的类型化读取方法，列序号对应 `GetConverterByTable` 的按表列位置映射（`SelectColumns` 顺序，从 0 开始）。在手动 mapper 里，**读取方法不能仅凭字段声明的 .NET 类型写死**，应在运行时用 `GetFieldType(i)` 探测数据库实际返回的类型，再分支到对应的类型化 Get 方法，正如示例对 `CreateTime` 的处理（返回文本 → `GetString` + 解析；返回原生 DATETIME → `GetDateTime`）；这其实正是框架 JIT 路径在编译期按列 `DbValueType → DbType` 所做的选择。`RegisterMapper<T>` 主要为 NativeAOT 提供无反射的预注册路径，但同样适用于"实体跨数据源动态切换"场景，作为显式、确定性的读取规则。
 
 ## 6. 完整示例：自定义 IP 地址转换器
 
@@ -417,19 +419,11 @@ DbConvertHandler<string, IPAddress>? IDbValueConverter<string, IPAddress>.DbRead
 
 ## 7. AOT 与非 AOT 的差异
 
-| 维度 | JIT（非 AOT） | AOT（NativeAOT） |
-|------|--------------|-----------------|
-| 转换器注册 | 相同 | 相同 |
-| 映射实现 | 表达式树编译 | 反射赋值 |
-| 读取方式 | 类型化读取，无装箱 | `GetValue()` 统一读取 + 桥接 |
-| 转换器调用 | 编译期内联强类型委托 | 运行时非泛型委托 |
-| 性能 | 最高 | 中等；`[Table]` 实体走源生成器仍高于纯反射路径，但低于 JIT |
-| 裁剪安全 | 需要 `[RequiresDynamicCode]` | 完全安全 |
+转换器注册与写入方向的规则在两种模式下一致，差别集中在读取映射：JIT 走表达式树编译，AOT 走源生成器或反射，装箱与性能差距见[第 5 章](#5-datareader-映射读取方向)的路径表。
 
-AOT 性能建议：
-1. 实体标注 `[Table]`，命中源生成器映射。
-2. 转换器同时实现泛型与非泛型接口,源生成器路径使用**非泛型**转换器委托（以 `GetValue()` 结果为输入），泛型版本仅供 JIT 路径使用。
-3. 减少匿名类型投影,多用已知强类型实体。
+自定义转换器想同时服务两条路径，就同时实现泛型与非泛型接口：源生成器与 AOT 反射路径用**非泛型**委托（输入是 `GetValue()` 的结果），泛型版本只服务 JIT 路径。
+
+迁移到 NativeAOT 前要核对的关联元数据前提、固定切片、DI 线路等事项，完整清单见 [NativeAOT 支持](./aot.md)。
 
 ## 8. 常见问题
 
@@ -439,7 +433,7 @@ AOT 性能建议：
 
 ### Q2：AOT 下比 JIT 慢很多怎么办？
 
-确保实体标注 `[Table]`，命中源生成器预注册的映射，性能与 JIT 相当。
+先确认实体标注了 `[Table]`，命中源生成器预注册的映射；再确认查询结果没有走匿名类型投影。逐项排查见 [NativeAOT 支持](./aot.md)的注意事项。
 
 ### Q3：重复注册同 key 的转换器会怎样？
 
@@ -456,7 +450,7 @@ AOT 性能建议：
 
 ### Q6：自定义转换器注册到基类，会不会影响已有类型的默认行为？
 
-会——如果注册的 key（.NET 值类型, DbValueType）与内置默认转换相同，就会覆盖它们。注册前请确认该 key 未被框架占用；如需针对个别数据库调整，优先注册到该方言类型而非基类。
+会。如果注册的 key（.NET 值类型, DbValueType）与内置默认转换相同，就会覆盖它们。注册前请确认该 key 未被框架占用；如需针对个别数据库调整，优先注册到该方言类型而非基类。
 
 ### Q7：同一个实体在多个数据源间动态切换，为什么读取会报错？
 

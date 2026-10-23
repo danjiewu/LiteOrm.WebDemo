@@ -1,10 +1,74 @@
 # Changelog
 
-## v8.1.11 (2026-09-29)
+## v8.1.13 (2026-10-22)
+
+### Breaking changes
+
+- **`Expr.From<T>()` / `Expr.FromRelated<T>()` return `QuerySource<T>`** (`LiteOrm.Common`): the return types change from `TableExpr` and `IEnumerable<T>` to the new `QuerySource<T>`. `Expr.From(Type)` is unchanged.
+
+- **Redundant generic lambda overloads are removed** (`LiteOrm.Common`): `Expr.Exists<T>(LogicExpr, ...)` and `Expr.ExistsRelated<T>(LogicExpr?, ...)` are deleted, and `ISourceAnchor.Where<T>(Expression<Func<T, bool>>)` is deleted as well.
+
+- **The `TableRef` abstract class is removed** (`LiteOrm.Common`): `JoinedTable` now derives from `SqlObject`; `ColumnRef.Table` and the two-argument constructor take `JoinedTable?` instead of `TableRef?`.
+
+### New Features
+
+- **New `QuerySource<T>` query source** (`LiteOrm.Common` / `LiteOrm`): implements `IOrderedQueryable<T>`, so queries can be composed outside a lambda; pass an executor (`IQuerySourceExecutor<T>`, implemented by `ObjectViewDAO<T>`) to run them directly. After `Where` / `Select`, call `AsSource()` to narrow back to `QuerySource<T>` and use the async methods. `GetQueryExpr()` turns a composed chain into an `Expr` without an executor, and a same-named extension on `IQueryable<T>` covers the static types after `OrderBy`. `ObjectViewDAO<T>` gains matching `SearchAs(IQueryable<TResult>)` and `Search(IQueryable<T>)` overloads.
+
+- **New query overloads accepting `IQueryable`** (`LiteOrm.Common` / `LiteOrm`): `LambdaExprExtensions` gains eight `IQueryable<T>` / `IQueryable<TResult>` overloads (`Search` / `SearchOne` / `SearchAsync` / `SearchOneAsync` / `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync`), and `DAOExtensions` adds `Search` overloads with and without `propertyNames` for `IDataViewDAO<TInput>`. Start the chain with `Expr.From<T>()` and pass it in, or keep using the existing IQueryable Lambda form. `Expr.Query` and these Lambda methods remain available and are not marked obsolete in this release.
+
+- **Method handlers support generic definitions** (`LiteOrm.Common`): `LambdaExprConverter` looks up registered handlers by specialized type first, then by the generic type definition.
+
+- **Root-level aggregate functions in lambdas** (`LiteOrm.Common`): `Count`, `LongCount`, `Sum`, `Average`, `Avg`, `Max` and `Min` now convert directly inside an IQueryable lambda.
+
+- **`Join` / `JoinRelated` and multi-arity query sources are added** (`LiteOrm.Common`): `Expr.From<T1>()` returns `QuerySource<T1>`, which exposes the instance methods `Join<T2>`, `JoinRelated<T2>()` and `JoinRelated<T2>(on)`, so only the right table type is named. New `QuerySource<T1, T2>` … `QuerySource<T1, ..., T7>` arity types append exactly one right table per `Join<TNext>` call and return the next arity, so `QuerySource<T1, T2>.Join<T3>` yields `QuerySource<T1, T2, T3>`; the tuple stays flat and the `on` parameters take one table each, with the already-joined tables first and the new right table last. Results still flow into `Where` / `OrderBy` through `IEnumerable<(T1, ..., Tn)>`; a following `Select` changes the element type, so `TResult` must be compatible with the projection (for example `IEnumerable<object>`). `x.Item1` / `x.Item2` and so on resolve to the correct aliases instead of being treated as columns named `Item1`. Joins build expressions both inside a lambda and outside one.
+
+- **`LambdaExprConverter` supports nested parameter contexts** (`LiteOrm.Common`): a constructor overload accepts a parent converter, letting a child inherit the parent's parameter mappings and share its alias sequence; the constructor registers every lambda parameter, with `param[0]` as the root table aliased `T0` and the rest getting fresh aliases `T{n}`.
+
+- **Association metadata and constant filters are generated under AOT** (`LiteOrm.Common` / `LiteOrm.Generators`): `TableInfoGenerator` writes `[TableJoin]`, `[ForeignType]` and `[ForeignColumn]` into `TableInfo.JoinedTables` and `ColumnInfo.ForeignTables` / `ForeignColumn`, and renders `[Column(Constant = ...)]` as a literal into `ColumnInfo.Constant`; at runtime `CommonTableInfoProvider` assembles the complete `TableView` and `TableDefinition.ConstFilter` from them, matching JIT.
+
+### Fixes
+
+- **Inner lambda parameters no longer shadow outer parameters with the same name** (`LiteOrm.Common`): when a nested lambda parameter shared a name with an outer one, the mapping was removed by name after conversion, so outer references failed (`ConvertParameter` returned null and `((IArged)u).TableArgs` assignments were skipped). Fixed together with the reference-keyed parameter scopes.
+
+***
+
+## v8.1.12 (2026-10-16)
+
+### Breaking changes
+
+- **Lambda delete extension methods renamed to `DeleteAll` / `DeleteAllAsync`** (`LiteOrm.Common`): `LambdaExprExtensions.Delete` and `DeleteAsync` are renamed to `DeleteAll` and `DeleteAllAsync` respectively, aligning with `IEntityService<T>.DeleteAll(LogicExpr)`.
+
+### New Features
+
+- **`AutoGenerateColumns` added to `[Table]`** (`LiteOrm.Common`): defaults to `true`, auto-mapping unmarked scalar properties as columns; when set to `false`, only properties explicitly marked with `[Column]` are mapped as columns, while `[Column(false)]` and `[ForeignColumn]` keep their meaning. The runtime (`AttributeTableInfoProvider`) and the AOT source generator (`TableInfoGenerator`) behave identically.
+
+- **`Expr.Delete<T>` now accepts a Lambda condition** (`LiteOrm.Common`): the new `Expr.Delete<T>(Expression<Func<T, bool>>? whereExpression)` overload builds a `DeleteExpr` directly from a Lambda condition; a new `Expr.Delete(Type objectType, LogicExpr? whereExpr, params string[] tableArgs)` overload builds one from a `LogicExpr`.
 
 ### Enhancements
 
-- **`ExprString` and `RawSql` moved into `LiteOrm.Common`** (`LiteOrm.Common`): both previously lived in the `LiteOrm` package and now move down alongside the expression infrastructure. The namespace is still `LiteOrm.Common`, so consuming code needs no change to its `using` directives or call sites.
+- **The WHERE condition on `Expr.Update<T>` is now optional** (`LiteOrm.Common`): the `whereExpression` parameter accepts `null`, so an `UpdateExpr` can be built without a WHERE clause.
+
+### Fixes
+
+- **Fixed unresolved table aliases in single-table UPDATE / DELETE statements** (`LiteOrm.Common`): references to the outer parameter from nested Lambdas such as `Expr.Exists`, as well as property aliases when building `UpdateExpr` / `DeleteExpr` from Lambdas, are now qualified by the target table name (substituted before WHERE conditions and assignments are processed), rather than the default alias `T0`, which does not exist in single-table statements.
+
+***
+
+## v8.1.11 (2026-09-29)
+
+### New Features
+
+- **`RegisterMemberHandler` can now register by type** (`LiteOrm.Common`): the new `RegisterMemberHandler(Type type, string? memberName = null, handler)` overload installs a member fallback for the type when `memberName` is null; an explicitly registered member takes precedence.
+
+### Enhancements
+
+- **`ExprString` and `RawSql` moved into `LiteOrm.Common`** (`LiteOrm.Common`): moved down alongside the expression infrastructure; the namespace is unchanged, so consuming code needs no change.
+
+### Fixes
+
+- **Corrected `CAST` type names on MySQL** (`LiteOrm`): `MySqlBuilder` now overrides `GetSqlTypeName`, rendering integers as `SIGNED` / `UNSIGNED` and strings or Guids as `CHAR`. OceanBase, TiDB and GreatDB are fixed along with it.
+
+- **Fixed a bug where the connection was not released when the database open failed** (`LiteOrm`): `DAOContextPool.PeekContext(Async)` left the context undisposed on a failed open, the context is now released on failure.
 
 ***
 
@@ -463,8 +527,6 @@ This release introduces several breaking changes. See the [8.1 Upgrade Guide](./
 ## v8.0.14 (2026-04-28)
 
 ### New Features
-
-- Added CodeGen project (`c862ffd`)
 
 - Added `StringExprConverter` with `Parse`/`ParsePagedQuery` methods by entity type (`b4d422f`)
 

@@ -2,6 +2,8 @@
 
 LiteOrm supports three query styles: **Lambda**, **`Expr`**, and **`ExprString`**. They all ultimately produce parameterized SQL, but differ in positioning and applicable scenarios.
 
+You only need C# and a simple `SELECT` to follow along. None of the three is better in the abstract, they just fit different situations: Lambda when conditions are hard-coded, `Expr` when conditions come from a frontend or a config file, `ExprString` when you want direct control over a piece of SQL.
+
 This article is the overview and entry point for query capabilities. Full usage of each style is covered in:
 
 - [Lambda Guide](./lambda-guide.en.md)
@@ -30,7 +32,7 @@ ExprString  ──────────────┘ ──(ToSql)──▶
 
 ### 1.2 Heuristics
 
-- **Prefer Lambda**: most business queries are the most intuitive — strongly typed, best readability.
+- **Prefer Lambda / `QuerySource<T>`**: most business queries are the most intuitive — strongly typed, best readability; when `Where` / `Select` / `OrderBy` need to be composed into a chain, use `QuerySource<T>` (`Expr.From<T>()`).
 - **Use `Expr` when conditions must be accumulated dynamically**: e.g. admin filters, frontend query builders, cross-layer condition passing.
 - **Use `ExprString` only when the DAO needs handwritten SQL**: it can supplement a `Search` condition fragment or carry full SQL; the Service layer does not expose this entry point.
 
@@ -41,22 +43,33 @@ Do you need to handwrite a SQL fragment or full SQL?
 ├─ Yes ─▶ use ExprString (DAO only)
 └─ No  ─▶ must conditions be accumulated dynamically / passed across layers?
         ├─ Yes ─▶ use Expr
-        └─ No  ─▶ use Lambda
+        └─ No  ─▶ use Lambda (QuerySource<T> for a composed query chain)
 ```
 
 ## 2. Service vs DAO query entry points
 
-LiteOrm's query entry points are split into two layers: the **Service layer** for business, and the **DAO layer** for lower-level capabilities.
+LiteOrm's query entry points are split into two layers: the **Service layer** for business, and the **DAO layer** for lower-level capabilities. On top of them, `QuerySource<T>` composes query chains and `Join` / `JoinRelated` handle multi-table joins.
 
 ### 2.1 Service
 
 ```csharp
 using static LiteOrm.Common.Expr;
 
+// 1. Lambda filter (preferred)
 var users1 = await userService.SearchAsync(u => u.Age >= 18);
-var users2 = await userService.SearchAsync(Prop("Age") >= 18);
-var users3 = await userService.SearchAsAsync<UserSummary>(
-    From<UserView>()
+
+// 2. Lambda projection (preferred)
+var users2 = await userService.SearchAsAsync(
+    q => q.Where(u => u.Age >= 18)
+          .Select(u => new { u.UserName, u.Age })
+);
+
+// 3. Use Expr when conditions are built dynamically
+var users3 = await userService.SearchAsync(Prop("Age") >= 18);
+
+// 4. Use SelectExpr when you need Expr-only projection features such as If(...).As("Level")
+var users4 = await userService.SearchAsAsync<UserSummary>(
+    From(typeof(UserView))
         .Where(Prop("Age") >= 18)
         .Select(
             Prop("Id"),
@@ -66,7 +79,9 @@ var users3 = await userService.SearchAsAsync<UserSummary>(
 );
 ```
 
-- Service query entry points are primarily Lambda / `Expr`, and also support `SelectExpr`-based `SearchAs(...)` / `SearchAsAsync(...)` projection queries, suitable for scenarios that need clear business semantics, transactions, AOP, or service encapsulation.
+- Service query entry points favor Lambda, with `Expr` as a supplement: write fixed conditions and projections as Lambda / `IQueryable<T>`; use `Expr` / `SelectExpr` only when conditions must be accumulated dynamically or when you need Expr-only features (such as `If(...).As(...)` column aliases). Suitable for scenarios that need clear business semantics, transactions, AOP, or service encapsulation.
+- `From<T>()` returns `QuerySource<T>` for IQueryable / Lambda chains; when you need an Expr chain such as `Where(Prop(...))` or `Select(...)`, use `From(typeof(T))`, which returns `TableExpr`. Do not mix the two forms.
+- To compose a query across layers, start with `Expr.From<T>()` (returns `QuerySource<T>`), then call `GetQueryExpr()` at the end to turn it into an `Expr`, or pass it straight to the `IQueryable<T>` overloads of `Search` / `SearchAs`. `Expr.Query` and the IQueryable Lambda form remain available.
 - The Service **does not** provide `ExprString` query overloads; if the requirement has become "handwrite SQL", switch to the DAO.
 
 ### 2.2 DAO
@@ -82,6 +97,71 @@ var users3 = await userViewDAO.Search($"WHERE {Prop("Age")} > {minAge}").ToListA
 - The DAO supports Lambda / `Expr`, plus `ExprString`, so it is more suitable for custom SQL fragments, full SQL, complex projection queries, and DataTable queries.
 - When you need `ExprString` `SearchAs(...)`, `Query(...)`, `Execute(...)`, `GetValue(...)`, or similar lower-level capabilities, use the DAO directly.
 
+### 2.3 `QuerySource<T>`: a composable query source
+
+`Expr.From<T>()` returns `QuerySource<T>`, which implements `IQueryable<T>` / `IOrderedQueryable<T>`, so standard LINQ operators such as `Where` / `Select` / `OrderBy` work directly. It has two usage modes:
+
+- **As a query placeholder inside a Lambda**: `Query<T, TResult>(q => q.Where(...))`, handled by the parser and translated to SQL.
+- **Composing outside a Lambda**: call `GetQueryExpr()` at the end to get an `Expr`, or pass it straight to the `IQueryable<T>` overloads of Service / DAO.
+
+```csharp
+using static LiteOrm.Common.Expr;
+
+// 1. Expression only: no executor needed
+SqlSegment expr = From<User>()
+    .Where(u => u.Age >= 18)
+    .OrderBy(u => u.UserName)
+    .Select(u => u.UserName)
+    .GetQueryExpr();
+
+// 2. Resolve an executor-bound source from the container and query directly
+var users = serviceProvider.GetRequiredService<QuerySource<User>>();
+List<User> adults = await users.Where(u => u.Age >= 18).AsSource().ToListAsync();
+
+// 3. Hand any IQueryable query to a DAO
+var userDAO = serviceProvider.GetRequiredService<ObjectViewDAO<User>>();
+var rows = await userDAO.SearchAs(
+    users.Where(u => u.Age >= 18).Select(u => new { u.Id, u.UserName })).ToListAsync();
+```
+
+Key points:
+
+- `Where` / `Select` / `OrderBy` statically return `IQueryable<T>` / `IOrderedQueryable<T>`; use `.AsSource()` to narrow back when you want the async instance methods of `QuerySource` (`ToListAsync`, `CountAsync`, `ToAsyncEnumerable`, ...).
+- `Expr.From<T>()` returns an executor-less instance meant for composing expressions; enumerating it directly throws `InvalidOperationException`. To execute, resolve `QuerySource<T>` from the container (executor-bound) or use a DAO.
+- A `QuerySource<T>` shares the DAO lifetime; do not cache it in singletons or static fields.
+
+### 2.4 Multi-table joins: `Join` / `JoinRelated`
+
+`Join<T2>` takes an explicit condition, while `JoinRelated<T2>` infers it from `[ForeignType]` / `[TableJoin]` metadata. Both are instance methods on `QuerySource<T1>`; the left table is already fixed, so you only specify the right table type:
+
+```csharp
+using static LiteOrm.Common.Expr;
+
+// Explicit condition
+var joined = From<Order>()
+    .Join<Customer>((o, c) => o.CustomerId == c.Id)
+    .Where((o, c) => c.Name == "VIP");
+
+// Inferred condition; optionally pick the join type (Left by default, or Inner / Right / Full)
+var related = From<Order>().JoinRelated<Customer>(TableJoinType.Inner);
+
+// Chained appends: one right table per call, one condition parameter per table
+var multi = From<Order>()
+    .Join<Customer>((o, c) => o.CustomerId == c.Id)
+    .Join<Region>((o, c, r) => c.RegionId == r.Id)
+    .Where((o, c, r) => r.Name == "North")
+    .Select((o, c, r) => new { o.Id, c.Name, r.Name });
+```
+
+- Results are `QuerySource<T1, T2>`, `QuerySource<T1, T2, T3>`, ..., with a **flat tuple** element type `(T1, T2)`, `(T1, T2, T3)`. `Where` / `Select` / `OrderBy` / `GroupBy` can use multi-parameter lambdas such as `(o, c, r) => ...`, or the `x.Item1` ... `x.Item7` form; each element resolves to its own table alias.
+- For the second join and later, the `on` parameters follow the order "already-joined tables first, new right table last"; reference them by parameter name, e.g. `(o, c, r) => c.RegionId == r.Id`.
+- `Join` defaults to a left join; `JoinRelated` uses the join type declared in metadata, and throws `InvalidOperationException` when no relation can be inferred, suggesting an explicit `Join`. In a chain, `JoinRelated` matches from back to front in association order, preferring the most recently joined table (for example, `JoinRelated<User>().JoinRelated<Dept>()` follows `User → Dept` and only falls back to the main table last).
+- `Join` / `JoinRelated` are intended for entity tables; do not mix them with views. View models already generate association JOINs through `[ForeignColumn]`, so mixing the two duplicates joins and may cause alias conflicts. See [Lambda Query Guide §5.4](./lambda-guide.en.md#54-joins-with-join-and-joinrelated).
+- Complete all joins **before** `Where` / `Select`; if you already applied `Where`, narrow it back with `.AsSource()` before calling `Join<TNext>`.
+- Up to 7 tables can be chained. When a `Select` follows a `Join` inside a Lambda, use `IEnumerable<object>` as `TResult` of `Expr.Query<T, TResult>`.
+
+For full rules, join types, and alias details, see [Lambda Query Guide §5.4](./lambda-guide.en.md#54-joins-with-join-and-joinrelated).
+
 ## 3. `Search` vs `SearchAs`
 
 Both `Search` and `SearchAs` are query entry points, but with different responsibilities:
@@ -89,7 +169,7 @@ Both `Search` and `SearchAs` are query entry points, but with different responsi
 | Aspect | `Search` / `SearchAsync` | `SearchAs<TResult>` / `SearchAsAsync<TResult>` |
 |--------|--------------------------|------------------------------------------------|
 | Return type | Entity type `T` (or view `TView`) | **Any** `TResult`: entity, anonymous type, scalar, custom projection class |
-| Construction | `Expr` / Lambda / `ExprString` (DAO only) | `SelectExpr` (Service+DAO) / Lambda projection / `ExprString` (DAO only) |
+| Construction | `Expr` / Lambda / `IQueryable<T>` / `ExprString` (DAO only) | `SelectExpr` (Service+DAO) / Lambda projection / `IQueryable<T>` / `ExprString` (DAO only) |
 | Field mapping | Positional mapping by `SelectColumns` registered in `TableInfoProvider` | See notes below |
 | Typical scenario | "query rows of this table" | "cross-table projection, aggregation, computed columns, type switching" |
 
@@ -98,19 +178,18 @@ Both `Search` and `SearchAs` are query entry points, but with different responsi
 ```csharp
 using static LiteOrm.Common.Expr;
 
-// Search: returns a list of User entities
-List<User> users = await viewService.SearchAsync(Prop("Age") >= 18);
+// Search: returns a list of entities
+var users = await viewService.SearchAsync(u => u.Age >= 18);
 
-// SearchAs: project to an anonymous type
-var anonSummaries = await viewService.SearchAsAsync<dynamic>(
-    From<UserView>()
-        .Where(Prop("Age") >= 18)
-        .Select(Prop("UserName"), Prop("Age"))
+// SearchAs: Lambda projection to an anonymous type
+var anonSummaries = await viewService.SearchAsAsync(
+    q => q.Where(u => u.Age >= 18)
+          .Select(u => new { u.UserName, u.Age })
 );
 
-// SearchAs: project to a custom type
-var summaries = await viewService.SearchAsAsync<UserSummary>(
-    From<UserView>()
+// SearchAs: use SelectExpr only when you need Expr-only features (e.g. If(...).As("Level") for exact column aliases)
+var summaries2 = await viewService.SearchAsAsync<UserSummary>(
+    From(typeof(UserView))
         .Where(Prop("Age") >= 18)
         .Select(
             Prop("Id"),
@@ -119,6 +198,8 @@ var summaries = await viewService.SearchAsAsync<UserSummary>(
         )
 );
 ```
+
+- To project to a named type, prefer the Lambda `new T { ... }` form as well (requires a public parameterless constructor on `T`); use `SelectExpr` only when `T` has only parameterized constructors or when you need exact control over column aliases (e.g. `If(...).As("Level")`).
 
 ### 3.2 Caveats when using `SearchAs`
 
@@ -156,7 +237,7 @@ public class UserSummary
 
 // ✅ Column alias "Level" matches constructor parameter name "level"
 await viewService.SearchAsAsync<UserSummary>(
-    From<UserView>().Select(
+    From(typeof(UserView)).Select(
         Prop("UserName"),
         Expr.If(Prop("IsVip") == true, "VIP", "Normal").As("Level")
     )
@@ -173,7 +254,7 @@ Aggregate queries like `COUNT` / `SUM` / `MAX` return a single scalar value; use
 ```csharp
 // ✅ Scalar projection
 var count = await viewService.SearchAsAsync<int>(
-    From<UserView>().Select(Expr.Func("COUNT", Prop("Id")))
+    From(typeof(UserView)).Select(Expr.Func("COUNT", Prop("Id")))
 );
 ```
 
@@ -198,7 +279,45 @@ If `TResult` is an entity type registered in `TableInfoProvider` (e.g. using `Se
 
 Switch to the DAO only for raw SQL projection (`ExprString`); Lambda projection is now supported directly on the Service (see [Lambda Guide](./lambda-guide.en.md#6-projection-queries-searchas-searchoneas)).
 
-## 4. Related links
+## 4. What happens during one query
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant V as ObjectViewDAO#lt;T#gt;
+    participant X as ExprSqlConverter
+    participant S as SessionManager
+    participant P as DAOContextPool
+    participant D as DAOContext
+    participant M as DataReaderConverter
+
+    C->>V: Search(expr)
+    V->>V: ToSelectExpr(expr)
+    V->>X: expr.ToPreparedSql(SqlBuildContext)
+    X-->>V: PreparedSql(SQL, Param[])
+    V->>S: GetDaoContext(source, readOnly=true)
+    S->>P: PeekContext(readOnly)
+    P-->>S: DAOContext (reused or new)
+    S-->>V: DAOContext
+    V->>D: PreparedCommands hit?
+    alt Hit
+        D-->>V: Reuse cached command (new proxy)
+    else Miss
+        V->>D: SetupCommand assembly + write to cache
+    end
+    V->>D: ExecuteReader() → AutoLockDataReader (holds lock)
+    D-->>M: Read row by row
+    M-->>C: EnumerableResult#lt;T#gt; lazily yields mapped objects
+```
+
+1. Expression to SQL. `Search(expr)` first completes the SELECT list through `ToSelectExpr`, then produces a `PreparedSql` via `ToPreparedSql`.
+2. Take a connection. The read-only pool is used by default; if the session is inside a transaction, the primary is forced (`SessionManager.cs:533`).
+3. Command cache. Lookup is by `(ObjectType, methodName)`. `Insert` and `BatchInsert` always use the cache, while statements carrying a constant filter and `GetObject` calls with computed-column `Expr` build a new command each time.
+4. Execute and hold the lock. `ExecuteReader` returns an `AutoLockDataReader`, and the lock is held until the results are fully read.
+5. Lazy evaluation. An `EnumerableResult<T>` comes back and the real execution happens at `ToList()` or `FirstOrDefault()`. It saves memory and lets you keep composing conditions before evaluation; the cost is that the connection stays checked out longer, so dispose the result object promptly.
+
+## 5. Related links
 
 - [CRUD Guide](./crud-guide.en.md)
 - [Lambda Guide](./lambda-guide.en.md)

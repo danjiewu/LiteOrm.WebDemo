@@ -58,6 +58,8 @@ LambdaExprConverter.RegisterMethodHandler(typeof(string), null, handler);  // Ha
 
 `"Format"` is just an example method name. In real projects, prefer `nameof(SomeType.SomeMethod)` so refactoring stays safer.
 
+Type-based registrations support open generics: resolution matches the specialized type first (for example `QuerySource<User>`), then falls back to the generic type definition (for example `typeof(QuerySource<>)`), so one registration covers every constructed form of that generic type.
+
 **Parameter Description:**
 
 | Parameter | Type | Description |
@@ -78,9 +80,14 @@ LambdaExprConverter.RegisterMemberHandler("Length", handler);
 
 // Register type-specific member handler
 LambdaExprConverter.RegisterMemberHandler(typeof(User), "Age", handler);
+
+// Attach the default handler as a type-level fallback (when memberName is null)
+LambdaExprConverter.RegisterMemberHandler(typeof(User));
 ```
 
 `"Length"` is also just an example member name. For your own members, prefer `nameof(SomeType.SomeProperty)` when possible.
+
+Passing only the type does not enumerate members; it installs a type-level fallback that takes over when a member access on that type is resolved (symmetric with the batch registration of `RegisterMethodHandler(typeof(SomeType))`). To send every member of a class through one custom handler, pass `handler` by name: `RegisterMemberHandler(typeof(User), handler: MyHandler)`, reading `node.Member.Name` inside to tell members apart. The typical use is mapping every property of a POCO to a JSON path of the same name, shown in [JSON Columns for Objects and Field-Level Queries](../typical-applications/json-column-mapping.en.md#requirement-2-filter-by-a-field-inside-the-object). An explicitly registered member (by type or by member name) takes precedence over the type-level fallback regardless of order, so to rewrite a single member just register it on its own.
 
 ## 3. SqlBuilder Methods
 
@@ -501,8 +508,9 @@ var users = await userService.SearchAsync(u => u.CreateTime.AddDays(7) > DateTim
 // Regex match (REGEXP_LIKE)
 var users = await userService.SearchAsync(u => Regex.IsMatch(u.UserName!, @"\d+"));
 // Regex replace (REGEXP_REPLACE)
-var dt = await dao.Search(Expr.Query<TestUser, IQueryable<object>>(q => q
-    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })));
+var dt = await dao.Search(Expr.From<TestUser>()
+    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })
+    .GetQueryExpr());
 ```
 
 ## 11. Default Registered SqlFunctions (Cross-Database)

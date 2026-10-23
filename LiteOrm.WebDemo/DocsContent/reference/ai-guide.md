@@ -111,7 +111,7 @@ var adults = await viewDao.Search(Expr.Prop("Age") > 18).ToListAsync();
 - `AddDataSource<TConnection>(name, connectionString, @default, syncTable, sqlBuilder, poolSize, maxPoolSize, paramCountLimit, keepAliveDuration)`：提供程序类型取 `TConnection`，连接池参数与建表同步在**这一次调用里配齐**，上下文不提供任何后置设置方法。
 - 需要显式构造配置时用 `AddDataSource(DataSourceConfig config, bool @default = false)`；`DataSourceConfig.ProviderType` / `SqlBuilderType` 是可赋值的 `Type?`（代码里只能赋 `Type`；`appsettings.json` 的 `Provider` / `SqlBuilder` 字符串键在加载时解析为 `Type`，失败抛 `TypeLoadException`）。
 - API 面很窄：`AddDataSource` / `CreateSession` / `DataSources` / `DefaultDataSourceName` / `GetDataSource` / `Dispose`，日志工厂由构造函数注入。
-- **建池时机**：首次 `CreateSession()` 按当前数据源配置一次建好全部连接池，此后 `AddDataSource` 抛 `InvalidOperationException`——所有 `AddDataSource` 必须排在首次 `CreateSession()` 之前。
+- **建池时机**：首次 `CreateSession()` 按当前数据源配置一次建好全部连接池，此后 `AddDataSource` 抛 `InvalidOperationException`：所有 `AddDataSource` 必须排在首次 `CreateSession()` 之前。
 - `Dispose()` 只销毁连接池工厂，不改 `SessionManager.Current`，因此不影响同进程内的 DI 线路。
 - 需要 AOP（`[Transaction]` / `[ServicePermission]` / `[ServiceLog]`）时必须改用 `RegisterLiteOrm()`；`LiteOrmContext` 与 `AddLiteOrm()` 都不提供 AOP。
 
@@ -121,15 +121,16 @@ var adults = await viewDao.Search(Expr.Prop("Age") > 18).ToListAsync();
 
 | 构建模式 | 注册方式 | 说明 |
 | --- | --- | --- |
-| AOT / 裁剪（`PublishAot` / `IsAotCompatible` / `PublishTrimmed` 等为 `true`） | 编译期源生成器（`LiteOrm.Generators.AutoRegisterGenerator`） | 生成 `LiteOrmAutoRegister.g.cs`，由模块初始化器登记注册回调，无反射、AOT 友好 |
+| AOT / 裁剪（`PublishAot` / `IsAotCompatible` / `PublishTrimmed` 等为 `true`） | 编译期源生成器（`LiteOrm.Generators.AutoRegisterGenerator`） | 生成注册代码，由模块初始化器登记，无反射 |
 | 非 AOT（默认） | 运行时程序集扫描 | `LiteOrmAutoRegistration.Apply()` 反射扫描引用程序集中带 `[AutoRegister]` 的类型 |
 
-- `AutoRegisterServices` 选项（默认 `true`）只控制**用户自定义**服务与 DAO 的自动注册：AOT 模式应用源生成器登记的注册代码，非 AOT 模式扫描程序集运行时注册；设为 `false` 时跳过这部分注册，需手动注册自定义服务。
+- `AutoRegisterServices` 选项（默认 `true`）只控制**用户自定义**服务与 DAO 的自动注册，由 `RuntimeFeature.IsDynamicCodeSupported` 在两种方式间自动分流；设为 `false` 时跳过这部分注册，需手动注册自定义服务。
 - 框架内置的泛型 DAO 与服务（`ObjectDAO<>` / `ObjectViewDAO<>` / `EntityService<>` / `EntityViewService<>` 及其接口）不受该选项影响，由 `AddLiteOrm()` 固定注册，`AutoRegisterServices` 为 `false` 时同样可用。
 - 注册范围由 `[AutoRegister]` 的 `Policy` 枚举 `RegisterPolicy` 控制：`All`（默认，实现类型自身 + 接口）、`Self`（仅自身）、`Interface`（仅接口）。
-- `AddLiteOrm()`：AOT 模式应用生成代码，非 AOT 模式走运行时扫描（由 `RuntimeFeature.IsDynamicCodeSupported` 自动分流）。
 - `RegisterLiteOrm()`：Autofac 程序集扫描注册，并自动应用 `[InterceptAttribute]`、`IEntityService` 系列接口，以及带 `[Service]`（`IsService=true`）特性的类型的 Castle 拦截器（`ServiceInvokeInterceptor`）。
 - 源生成默认在 AOT 构建时自动启用；如需在普通构建里也生成（例如提前验证 AOT 兼容性），在程序集上显式声明 `[assembly: LiteOrmCodeGen]`（`LiteOrmCodeGenAttribute`）。
+
+AOT 构建下的完整注意事项（DI 线路、关联元数据、固定切片、转换器声明）见 [NativeAOT 支持](../advanced-topics/aot.md)。
 
 ## 二、实体与视图定义
 
@@ -163,6 +164,7 @@ public class UserView : User
 | `Name` | 数据库表名，支持占位符分表。 |
 | `DataSource` | 指定当前实体所属数据源。 |
 | `SyncTable` | 实体级表结构同步模式，枚举 `SyncTableMode`（`Default` / `Never` / `Always`），默认 `Default`。`Never`/`Always` 覆盖数据源级 `SyncTable` 配置。 |
+| `AutoGenerateColumns` | 是否为未标注 `[Column]` 的属性自动生成列，默认 `true`。设为 `false` 时只有显式标注 `[Column]` 的属性才映射为列，未标注的一律忽略，`[ForeignColumn]` 不受影响。 |
 
 ```csharp
 [Table("Logs", SyncTable = SyncTableMode.Always)] // 始终自动建表，即使数据源 SyncTable=false
@@ -262,26 +264,34 @@ public class UserService : EntityService<User, UserView>, IUserService { }
 
 | 方法                                                                                                                                             | 返回类型                |
 | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `Delete(Expression<Func<T, bool>> expression, params string[] tableArgs)`                                                                      | `int`               |
-| `DeleteAsync(Expression<Func<T, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)`                                 | `Task<int>`         |
+| `DeleteAll(Expression<Func<T, bool>> expression, params string[] tableArgs)`                                                                   | `int`               |
+| `DeleteAllAsync(Expression<Func<T, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)`                              | `Task<int>`         |
 | `Search(Expression<Func<TView, bool>> expression, string[] tableArgs = null)`                                                                  | `List<TView>`       |
 | `Search(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null)`                                         | `List<TView>`       |
+| `Search(IQueryable<TView> query, string[] tableArgs = null)`                                                                                   | `List<TView>`       |
 | `SearchOne(Expression<Func<TView, bool>> expression, string[] tableArgs = null)`                                                               | `TView`             |
 | `SearchOne(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null)`                                      | `TView`             |
+| `SearchOne(IQueryable<TView> query, string[] tableArgs = null)`                                                                                | `TView`             |
 | `Exists(Expression<Func<TView, bool>> expression, params string[] tableArgs)`                                                                  | `bool`              |
 | `Count(Expression<Func<TView, bool>> expression, params string[] tableArgs)`                                                                   | `int`               |
 | `SearchAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)`                             | `Task<List<TView>>` |
 | `SearchAsync(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null, CancellationToken ct = default)`    | `Task<List<TView>>` |
+| `SearchAsync(IQueryable<TView> query, string[] tableArgs = null, CancellationToken ct = default)`                                              | `Task<List<TView>>` |
 | `SearchOneAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)`                          | `Task<TView>`       |
 | `SearchOneAsync(Expression<Func<IQueryable<TView>, IQueryable<TView>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TView>`       |
+| `SearchOneAsync(IQueryable<TView> query, string[] tableArgs = null, CancellationToken ct = default)`                                           | `Task<TView>`       |
 | `ExistsAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)`                             | `Task<bool>`        |
 | `CountAsync(Expression<Func<TView, bool>> expression, string[] tableArgs = null, CancellationToken ct = default)`                              | `Task<int>`         |
 | `SearchAs(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)`                                     | `List<TResult>`     |
+| `SearchAs(IQueryable<TResult> query, string[] tableArgs = null)`                                                                               | `List<TResult>`     |
 | `SearchOneAs(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)`                                  | `TResult`           |
-| `SearchAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)`                               | `Task<List<TResult>>` |
-| `SearchOneAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null)`                            | `Task<TResult>`     |
+| `SearchOneAs(IQueryable<TResult> query, string[] tableArgs = null)`                                                                            | `TResult`           |
+| `SearchAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<List<TResult>>` |
+| `SearchAsAsync(IQueryable<TResult> query, string[] tableArgs = null, CancellationToken ct = default)`                                          | `Task<List<TResult>>` |
+| `SearchOneAsAsync(Expression<Func<IQueryable<TView>, IQueryable<TResult>>> expression, string[] tableArgs = null, CancellationToken ct = default)` | `Task<TResult>`     |
+| `SearchOneAsAsync(IQueryable<TResult> query, string[] tableArgs = null, CancellationToken ct = default)`                                       | `Task<TResult>`     |
 
-> 补充说明：Service 查询公开入口包括 `Expr`、其 Lambda 扩展（含 `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync` 投影），以及基于 `SelectExpr` 的 `SearchAs(...)` / `SearchAsAsync(...)`；如果需要 `ExprString`、完整 SQL 或 DataTable 查询，请切换到 DAO。
+> 补充说明：Service 查询公开入口包括 `Expr`、其 Lambda 扩展（含 `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync` 投影）、接收 `IQueryable<T>` 的重载，以及基于 `SelectExpr` 的 `SearchAs(...)` / `SearchAsAsync(...)`；`Expr.Query` 与 IQueryable Lambda 写法均保持可用。如果需要 `ExprString`、完整 SQL 或 DataTable 查询，请切换到 DAO。
 
 ### ObjectDAO<T>（仅增删改）
 
@@ -320,9 +330,11 @@ public class UserService : EntityService<User, UserView>, IUserService { }
 | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | `Search(Expr expr = null)`                                                                                                    | `EnumerableResult<T>`       |
 | `Search(Expression<Func<IQueryable<T>, IQueryable<T>>> expr)`                                                                 | `EnumerableResult<T>`       |
+| `Search(IQueryable<T> query)`                                                                                                 | `EnumerableResult<T>`       |
 | `Search(ref ExprString sqlBody, bool isFull = false)`                                                                         | `EnumerableResult<T>`       |
-| `SearchAs<TResult>(SelectExpr selectExpr, Func<DbDataReader, TResult> readerFunc = null)`                                     | `EnumerableResult<TResult>` |
-| `SearchAs<TResult>(Expression<Func<IQueryable<T>, IQueryable<TResult>>> expr, Func<DbDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
+| `SearchAs<TResult>(SelectExpr selectExpr, Func<AutoLockDataReader, TResult> readerFunc = null)`                               | `EnumerableResult<TResult>` |
+| `SearchAs<TResult>(Expression<Func<IQueryable<T>, IQueryable<TResult>>> expr, Func<AutoLockDataReader, TResult> readerFunc = null)` | `EnumerableResult<TResult>` |
+| `SearchAs<TResult>(IQueryable<TResult> query, Func<AutoLockDataReader, TResult> readerFunc = null)`                           | `EnumerableResult<TResult>` |
 | `SearchAs<TResult>(ref ExprString sqlBody)`                                                                                  | `EnumerableResult<TResult>` |
 | `GetObject(params object[] keys)`                                                                                             | `EnumerableResult<T>`       |
 | `Count(Expr expr)`                                                                                                            | `ValueResult<int>`          |
@@ -339,6 +351,8 @@ public class UserService : EntityService<User, UserView>, IUserService { }
 | `Search(Expr expr)`                                   | `DataTableResult` |
 | `Search(string[] propertyNames, Expr expr)`           | `DataTableResult` |
 | `Search(ref ExprString sqlBody, bool isFull = false)` | `DataTableResult` |
+| `Search<TInput, TResult>(IQueryable<TResult> query)`（扩展） | `DataTableResult` |
+| `Search<TInput, TResult>(string[] propertyNames, IQueryable<TResult> query)`（扩展） | `DataTableResult` |
 
 ### DataDAO<T>（按列值批量更新）
 
@@ -466,8 +480,8 @@ services.AddScoped<IEntityServiceEvent<User>, UserAuditEvent>();
 
 | 方式                           | 适用场景                  |
 | ---------------------------- | --------------------- |
-| Lambda 表达式 `u => u.Age > 18` | 简单条件，编译时类型安全          |
-| Expr 对象（运算符 / Fluent 方法）     | 复杂条件、动态条件累加、链式查询      |
+| Lambda 表达式 `u => u.Age > 18` | 常规固定条件（首选），编译时类型安全     |
+| Expr 对象（运算符 / Fluent 方法）     | 动态条件累加、跨层复用、需要 Expr 专属能力 |
 | ExprString 插值字符串             | 自定义 DAO 中的条件片段或完整 SQL |
 
 ### Expr 静态工厂方法
@@ -482,7 +496,12 @@ services.AddScoped<IEntityServiceEvent<User>, UserAuditEvent>();
 | `Expr.Aggregate("SUM", expr, isDistinct)`        | `FunctionExpr`    | 聚合函数（IsAggregate=true）                      |
 | `Expr.Concat(e1, e2)`                            | `ValueSet`        | CONCAT 字符串拼接（扩展方法）                          |
 | `Expr.Lambda<T>(u => u.Age > 18)`                | `LogicExpr`       | Lambda 转 Expr                               |
-| `Expr.From<T>(tableArgs)`                        | `FromExpr`        | 链式查询起点                                      |
+| `Expr.From(type, tableArgs)`                     | `TableExpr`       | 按 `Type` 构造链式查询起点；泛型场景用 `Expr.From<T>()` 获取 `QuerySource<T>` |
+| `Expr.From<T>(tableArgs)`                        | `QuerySource<T>`  | 构造查询源；Lambda 内由解析器接管，Lambda 外可拼 IQueryable 查询，无执行器时不能取数 |
+| `Expr.From<T>()...GetQueryExpr()`                | `Expr`            | 把 IQueryable 查询链转成 Expr，不需要执行器            |
+| `QuerySource<T1>.Join<T2>(on)` / `JoinRelated<T2>()` | `QuerySource<T1, T2>` | 连接一张右表，返回元素为 `(T1, T2)` 的查询源 |
+| `QuerySource<T1,...,Tn>.Join<Tn+1>(on)` / `JoinRelated<Tn+1>()` | `QuerySource<T1,...,Tn+1>` | 链式追加右表，n 最多 7，结果元组始终平铺；每步只写一张右表类型 |
+| `IQueryable<T>.AsSource()`                       | `QuerySource<T>`  | 把 `IQueryable<T>` 静态类型收窄回查询源，继续调用异步方法 |
 | `Expr.Sql("key", arg)`                           | `GenericSqlExpr`  | 动态 SQL 片段                                   |
 | `Expr.Delete<T>(tableArgs)`                      | `DeleteExpr`      | 创建 DELETE 表达式                               |
 | `Expr.If(condition, thenExpr, elseExpr)`         | `FunctionExpr`    | IF 表达式                                      |
@@ -491,12 +510,13 @@ services.AddScoped<IEntityServiceEvent<User>, UserAuditEvent>();
 | `Expr.Case(params Expr[])`                       | `FunctionExpr`    | CASE 表达式（交替参数形式）                          |
 | `Expr.Query<T>(expression)`                      | `Expr`            | IQueryable Lambda 转 Expr                    |
 | `Expr.Query<T, TResult>(expression)`             | `Expr`            | 带返回值的 IQueryable Lambda 转 Expr              |
-| `Expr.Exists<T>(innerExpr, tableArgs)`           | `ForeignExpr`     | 关联表 EXISTS 查询                               |
-| `Expr.Exists(type, innerExpr, tableArgs)`        | `ForeignExpr`     | 关联表 EXISTS 查询（指定类型）                         |
-| `Expr.ExistsRelated<T>(innerExpr, tableArgs)`    | `ForeignExpr`     | 自动关联的 EXISTS 查询                             |
-| `Expr.ExistsRelated(type, innerExpr, tableArgs)` | `ForeignExpr`     | 自动关联的 EXISTS 查询（指定类型）                       |
+| `Expr.Exists(type, innerExpr, tableArgs)`        | `ForeignExpr`     | 关联表 EXISTS 查询                               |
+| `Expr.ExistsRelated(type, innerExpr, tableArgs)` | `ForeignExpr`     | 自动关联的 EXISTS 查询                             |
 | `Expr.Exists<T>(lambda)`                         | `bool`            | 仅用于 Lambda 表达式中构造 EXISTS 查询（直接调用会抛出异常）      |
 | `Expr.ExistsRelated<T>(lambda)`                  | `bool`            | 仅用于 Lambda 表达式中构造自动关联的 EXISTS 查询（直接调用会抛出异常） |
+| `Expr.FromRelated<T>(tableArgs)`                 | `QuerySource<T>`  | 同 `Expr.From<T>()`，Lambda 内额外补上自动关联条件                     |
+
+> `Join` / `JoinRelated` 只用于实体表；视图模型已通过 `[ForeignColumn]` 自动生成关联 JOIN，不要与视图混用。显式多表连接使用实体类型，按关联表过滤使用 `ExistsRelated`。
 
 补充规则：
 
@@ -574,7 +594,7 @@ services.AddScoped<IEntityServiceEvent<User>, UserAuditEvent>();
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var query = From<User>()
+var query = From(typeof(User))
     .Where(Prop("Age") > 18)                         // WhereExpr
     .SelectAll()                                     // SelectExpr，等价于 SELECT *
     .Where(Prop("Status") == 1)
@@ -586,7 +606,7 @@ var query = From<User>()
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var query = From<User>()
+var query = From(typeof(User))
     .Where(Prop("Age") > 18)                         // WhereExpr
     .GroupBy(Prop("DeptId"))                         // GroupByExpr
     .Having(Prop("Id").Count() > 5)                  // HavingExpr
@@ -601,7 +621,7 @@ var query = From<User>()
 ```csharp
 using static LiteOrm.Common.Expr;
 // IN 子查询
-var subQuery = From<Department>()
+var subQuery = From(typeof(Department))
     .Where(Prop("Name") == "IT")
     .Select("Id");
 var expr = Prop("DeptId").In(subQuery);
@@ -611,10 +631,10 @@ UpdateExpr / DeleteExpr（用于 `ObjectDAO.Delete(LogicExpr)` / `ObjectDAO.Upda
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var update = new UpdateExpr(From<User>(), Prop("Id") == 1);
+var update = new UpdateExpr(From(typeof(User)), Prop("Id") == 1);
 update.Set(("UserName", Value("NewName")), ("Age", Value(30)));
 
-var delete = new DeleteExpr(From<User>(), Prop("Age") < 18);
+var delete = new DeleteExpr(From(typeof(User)), Prop("Age") < 18);
 ```
 
 ### ExprString
@@ -637,7 +657,7 @@ var table = dataViewDao.Search(
 >
 > `ExprString` 不支持把 `SelectExpr.With(name)` / `CommonTableExpr` 这种 CTE 表达式自动展开成 `WITH` SQL。需要 CTE 时，请使用 `Expr` / `SelectExpr` 结构化构建；如果必须走 `ExprString`，请手动写完整 `WITH ... SELECT ...` SQL。
 
-#### RawSql —— 插入原始 SQL 片段
+#### RawSql：插入原始 SQL 片段
 
 `RawSql` 是独立的 `readonly struct`（**不**继承 `Expr`），作为 `ExprString` 的辅助入口存在。在插值字符串中插入 `RawSql` 时，其内容会**原样拼入 SQL**，不参数化、不做语法处理、不替换 `[ ]` 占位符。专用于**不适合参数化的动态值**；纯静态的 SQL 文本直接写在 `ExprString` 字面量中即可，无需使用 `RawSql`：
 
@@ -697,9 +717,16 @@ var expr = Exists<Department>(Prop("Name") == "IT");
 // 等价 Lambda 写法（在 Lambda 查询中）：
 var expr = Lambda<User>(u => Exists<Department>(d => d.Name == "IT"));
 
-// SearchAs 选择部分字段
+// SearchAs 选择部分字段（首选 Lambda 投影）
 var result = dao.SearchAs(
     From<User>()
+        .Where(u => u.Age > 18)
+        .Select(u => new { u.Id, u.UserName })
+).ToList();
+
+// 需要 SelectExpr 专属能力（按字符串动态选列、If(...).As("Level") 等）时再用它
+var result2 = dao.SearchAs(
+    From(typeof(User))
         .Where(Prop("Age") > 18)
         .Select("Id", "UserName")
 ).ToList();

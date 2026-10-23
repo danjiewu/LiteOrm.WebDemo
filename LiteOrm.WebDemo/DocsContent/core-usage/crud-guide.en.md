@@ -2,6 +2,8 @@
 
 This page focuses on LiteOrm's write operations: insert, update, delete, upsert, and batching. For query capabilities, please refer to the [Query Overview](./query-overview.en.md).
 
+One thing to remember before reading: writes live on `ObjectDAO<T>`, reads live on `ObjectViewDAO<T>`, and the two are not interchangeable. Every example below starts from the write DAO.
+
 ## 1. Insert
 
 ### Single Insert
@@ -182,7 +184,47 @@ Important behavior details:
 
 > For a complete example, see `LiteOrm.Tests\ObjectDAOTests.cs` and `LiteOrm.Tests\Models\TestTimestampUser.cs`.
 
-### Conditional Update
+### Update with Lambda Expressions (Recommended)
+
+For conditional updates, prefer the `UpdateAll` / `UpdateAllAsync` Lambda extension methods. They accept two Lambda expressions: the first defines which fields to update and the values to set, and the second defines the `WHERE` condition. The framework internally converts them to an `UpdateExpr` via `LambdaExprConverter`, so the syntax is closer to EF Core and benefits from compile-time type checking.
+
+```csharp
+// Equivalent to: UPDATE Users SET Age = 29 WHERE UserName = 'UpdateDemo_Alice'
+await userService.UpdateAllAsync(
+    u => new User { Age = 29 },
+    u => u.UserName == "UpdateDemo_Alice"
+);
+```
+
+The update expression can also reference the original entity fields for arithmetic (e.g. increment, string concatenation), and the `WHERE` condition supports logical combinations such as `&&` / `||`:
+
+```csharp
+// Equivalent to: UPDATE Users SET Age = Age + 1, CreateTime = @now WHERE Age >= 28
+await userService.UpdateAllAsync(
+    u => new User { Age = u.Age + 1, CreateTime = DateTime.Now },
+    u => u.Age >= 28
+);
+```
+
+Usage notes:
+
+- The first Lambda must be an `Expression<Func<T, T>>` whose body is a `new T { ... }` form (a `MemberInitExpression`). Each `=` binding is translated into a `SET` clause.
+- The second Lambda is an `Expression<Func<T, bool>>`, i.e. a regular WHERE condition. It can be omitted (when `whereExpression` is not provided, all rows are updated — use with caution).
+- Referencing the original field (e.g. `u.Age + 1`) is translated to `Prop("Age") + Const(1)`, corresponding to the SQL `Age = Age + 1`.
+- You can also pass dynamic table name arguments via `params string[] tableArgs`.
+
+```csharp
+// Sync version + dynamic table name
+userService.UpdateAll(
+    u => new User { Age = 30 },
+    u => u.UserName == "UpdateDemo_Bob",
+    "2026" // table name argument, fills {0} in [Table("Users_{0}")]
+);
+```
+
+### Conditional Update (Expr)
+
+Use `UpdateExpr` only when the `SET` clause must be assembled dynamically from runtime data:
 
 ```csharp
 using static LiteOrm.Common.Expr;
@@ -219,44 +261,6 @@ var rename = new UpdateExpr(new TableExpr(typeof(User)), Prop("UserName") == "Up
     .Set(("UserName", Func("CONCAT", Prop("UserName"), Const("_v2"))));
 ```
 
-### Update with Lambda Expressions (Recommended)
-
-If you don't want to assemble an `UpdateExpr` by hand, you can call the `UpdateAll` / `UpdateAllAsync` Lambda extension methods directly. They accept two Lambda expressions: the first defines which fields to update and the values to set, and the second defines the `WHERE` condition. The framework internally converts them to an `UpdateExpr` via `LambdaExprConverter`, so the syntax is closer to EF Core and benefits from compile-time type checking.
-
-```csharp
-// Equivalent to: UPDATE Users SET Age = 29 WHERE UserName = 'UpdateDemo_Alice'
-await userService.UpdateAllAsync(
-    u => new User { Age = 29 },
-    u => u.UserName == "UpdateDemo_Alice"
-);
-```
-
-The update expression can also reference the original entity fields for arithmetic (e.g. increment, string concatenation), and the `WHERE` condition supports logical combinations such as `&&` / `||`:
-
-```csharp
-// Equivalent to: UPDATE Users SET Age = Age + 1, CreateTime = @now WHERE Age >= 28
-await userService.UpdateAllAsync(
-    u => new User { Age = u.Age + 1, CreateTime = DateTime.Now },
-    u => u.Age >= 28
-);
-```
-
-Usage notes:
-
-- The first Lambda must be an `Expression<Func<T, T>>` whose body is a `new T { ... }` form (a `MemberInitExpression`). Each `=` binding is translated into a `SET` clause.
-- The second Lambda is an `Expression<Func<T, bool>>`, i.e. a regular WHERE condition. It can be omitted (when `whereExpression` is not provided, all rows are updated — use with caution).
-- Referencing the original field (e.g. `u.Age + 1`) is translated to `Prop("Age") + Const(1)`, corresponding to the SQL `Age = Age + 1`.
-- You can also pass dynamic table name arguments via `params string[] tableArgs`.
-
-```csharp
-// Sync version + dynamic table name
-userService.UpdateAll(
-    u => new User { Age = 30 },
-    u => u.UserName == "UpdateDemo_Bob",
-    "2026" // table name argument, fills {0} in [Table("Users_{0}")]
-);
-```
-
 ## 3. Delete
 
 ### Delete by Entity
@@ -284,7 +288,6 @@ await userService.BatchDeleteIDAsync(new[] { 1, 2, 3 });
 A complete validation cycle suitable for copying:
 
 ```csharp
-using static LiteOrm.Common.Expr;
 var users = new List<TestUser>
 {
     new TestUser { Name = "Batch 1", Age = 10, CreateTime = DateTime.Now },
@@ -293,7 +296,7 @@ var users = new List<TestUser>
 
 await service.BatchInsertAsync(users);
 
-var inserted = await viewService.SearchAsync(Lambda<TestUser>(u => u.Name!.StartsWith("Batch")));
+var inserted = await viewService.SearchAsync(u => u.Name!.StartsWith("Batch"));
 
 foreach (var user in inserted)
     user.Age += 5;
@@ -382,6 +385,36 @@ Suitable for "insert new batch of data while deleting old data" sync migration s
 - Prioritize batch interfaces for high-frequency write scenarios.
 - When you need explicit control over SQL structure, use `Expr.Update<T>()` and DAO.
 - Cross-table business operations should be placed in Service layer with transaction coordination.
+
+## 8. What happens during one write
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant O as ObjectDAO#lt;T#gt;
+    participant X as SqlBuilder
+    participant D as DAOContext
+    participant N as Data source
+
+    C->>O: Insert(entity) / Update / Delete
+    O->>O: MakeInsertSql (with ConstFilter injected)
+    O->>O: GetPreparedCommand(useCache)
+    O->>X: ToParamName / ToSqlName / ToDbType
+    X-->>O: Dialect SQL and parameter names
+    O->>D: Bind Param values (DbWriteConverter)
+    D->>N: DbCommandProxy.ExecuteNonQuery (acquire scope, attach transaction)
+    N-->>D: Affected rows
+    D-->>C: bool / int
+```
+
+1. Build the write statement. `MakeInsertSql` / `MakeUpdateSql` / `MakeDeleteSql` assemble with `ValueStringBuilder` and inject the constant filter condition along the way.
+2. Take a command. `Insert` and `BatchInsert` always use a cached command; updates, deletes and key-path operations that carry a constant filter build a new one each time, so the reusable commands in the cache stay clean.
+3. Bind parameters. `SetupCommand` creates `DbParameter` objects, resolves `DbType` from `DbValueType`, and converts values where needed.
+4. Execute. `DbCommandProxy.ExecuteNonQuery` acquires the context scope and attaches the current transaction.
+5. Return. Single-row operations return `bool`; conditional batch operations return affected rows as `int`.
+
+On the read/write split: `ObjectDAO<T>` writes only and `ObjectViewDAO<T>` reads only, both inheriting `DAOBase`. See [View Models and Services](./view-models-and-services.en.md#how-dao-splits-reads-and-writes).
 
 ## Related Links
 

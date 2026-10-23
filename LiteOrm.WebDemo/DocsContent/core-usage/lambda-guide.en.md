@@ -193,28 +193,171 @@ var users = await userService.SearchAsync(
 
 `ExistsRelated` fills in the relation condition from metadata such as `ForeignType` and `TableJoin`. Use this when relationships are already declared in the model and you only want to filter the main table by related-table conditions. For matching rules, inheritance behavior, and `ConstFilter` interaction, see [Associations](./associations.en.md).
 
-## 6. Projection Queries (`SearchAs` / `SearchOneAs`)
+### 5.3 Nested Lambdas and Parameter Scopes
 
-`SearchAs` / `SearchOneAs` accept IQueryable-style lambdas and project the result into a target type (custom classes or anonymous types), which is convenient for "select only some columns" or "assemble view / summary objects":
+Parameters of an inner lambda are tracked per instance, so an inner parameter that shares a name with an outer one no longer clobbers the outer mapping:
 
 ```csharp
-// Project to a custom class
+// Inner and outer parameters are both named u; outer references stay valid after the inner lambda is converted
+var users = await userService.SearchAsync(
+    u => u.Age > 18 && Exists<Department>(u => u.Name == "R&D") && u.UserName != null
+);
+```
+
+Every parameter of a multi-parameter lambda is registered: the first one maps to the root table with alias `T0`, the rest receive fresh aliases `T{n}`.
+
+When a custom method handler converts an inner lambda, the constructor overload passes the outer parameter context into the child converter. Inner lambdas can then reference outer parameters, and parent and child share one alias sequence so nested scopes never allocate a duplicate alias:
+
+```csharp
+LambdaExprConverter.RegisterMethodHandler("ExistsIn", (node, converter) =>
+{
+    var lambda = (LambdaExpression)((UnaryExpression)node.Arguments[1]).Operand;
+    var child = new LambdaExprConverter(lambda, converter);
+    // The child root table acts as the subquery table; outer parameters stay visible in InnerExpr
+    return new ForeignExpr(child.Table!.Type)
+    {
+        Alias = child.Table!.Alias,
+        InnerExpr = child.ToLogicExpr()
+    };
+});
+```
+
+For the full extension mechanism, see [Expression Extension](../extensibility/expression-extension.en.md).
+
+### 5.4 Joins with `Join` and `JoinRelated`
+
+`Join<T2>` takes an explicit condition, while `JoinRelated<T2>` infers one from foreign-key metadata. Both are instance methods on the `QuerySource<T1>` returned by `From<T1>()`, so the left table type is already pinned and you only name the right one:
+
+```csharp
+using static LiteOrm.Common.Expr;
+
+// Explicit condition
+var expr = Query<Order, IEnumerable<(Order, Customer)>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Where((o, c) => c.Name == "VIP")
+);
+
+// When projecting, use IEnumerable<object> as the result type (anonymous types cannot be generic arguments)
+var projected = Query<Order, IEnumerable<object>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Select((o, c) => new { o.Id, c.Name })
+);
+
+// Inferred foreign-key condition
+var related = Query<Order, IEnumerable<(Order, Customer)>>(
+    q => From<Order>().JoinRelated<Customer>()
+);
+
+// Inferred condition combined with an extra one by AND
+var merged = Query<Order, IEnumerable<(Order, Customer)>>(
+    q => From<Order>().JoinRelated<Customer>((o, c) => o.Amount > 0)
+);
+
+// Multiple tables: name one right table per call; the result grows into a flat (Order, Customer, Region)
+var multiple = Query<Order, IEnumerable<(Order, Customer, Region)>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Join<Region>((o, c, r) => c.RegionId == r.Id)
+          .Where((o, c, r) => r.Name == "North")
+);
+
+// Inferred multi-table joins also name one right table per call
+var multipleRelated = Query<Order, IEnumerable<(Order, Customer, Region)>>(
+    q => From<Order>().JoinRelated<Customer>().JoinRelated<Region>()
+);
+
+// Multi-parameter ordering / grouping
+var ordered = Query<Order, IEnumerable<object>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .Where((o, c) => o.Amount > 10)
+          .OrderBy((o, c) => c.Name)
+          .ThenByDescending((o, c) => o.Amount)
+          .Select((o, c) => new { o.Id, c.Name, o.Amount })
+);
+
+var grouped = Query<Order, IEnumerable<object>>(
+    q => From<Order>()
+          .Join<Customer>((o, c) => o.CustomerId == c.Id)
+          .GroupBy((o, c) => c.Name)
+          .OrderBy(g => g.Key)
+          .Select(g => new { Name = g.Key, Count = g.Count() })
+);
+```
+
+The result is a sequence of element tuples; `Where` / `OrderBy` preserve the tuple element type, while `Select` changes it to the projection result. `Where` / `Select` / `OrderBy` / `GroupBy` can use multi-parameter lambdas such as `(o, c) => ...`, with parameters following the table order; the `x.Item1`, `x.Item2`, ..., `x.Item7` form also remains available. Each element resolves to the correct table alias during conversion. Multi-table joins are chained: `From<T1>()` returns `QuerySource<T1>`, `Join<T2>` returns `QuerySource<T1, T2>`, and a further `Join<T3>` yields `QuerySource<T1, T2, T3>`, up to seven elements. The tuple is always flat; the `on` parameters of each chained call take one table each, with the already-joined tables first and the new right table last.
+
+`Join` / `JoinRelated` are instance methods that build expressions both inside a lambda and outside one; `Expr.Query` and the `Expr.From<T>()` chain are both supported entry points.
+
+> **Do not mix `Join` / `JoinRelated` with views.** These methods are intended for entity tables. View models (`ObjectViewDAO<TView>`, or types with `[ForeignColumn]`) already generate their association JOINs from metadata. Using a view as the query source or as the right table of a `Join` duplicates the view's own association joins and can lead to alias conflicts or unresolvable columns; this combination is not guaranteed to work in the current version. For related data, query the view directly and let `ForeignColumn` join automatically; for filtering by a related table, use `ExistsRelated`; for explicit multi-table joins, use entity types.
+
+A few points worth knowing:
+
+- `Join` produces SQL like `FROM Orders T0 LEFT JOIN Customers T1 ON T0.CustomerId = T1.Id`; the join type defaults to left.
+- `JoinRelated` throws `InvalidOperationException` when no relation can be inferred, telling you to use `Join` with an explicit condition. Declare such relations with `[ForeignType]` or `[TableJoin]`.
+- Multi-level joins are supported: `From<A>().Join<B>(...).Join<C>(...)` appends JOINs. The condition lambda takes one parameter per table in order — already-joined tables first, then the new right table: the second join is `(a, b, c) => ...` and the third is `(a, b, c, d) => ...`.
+- Each chained `Join` / `JoinRelated` appends exactly one table; the explicit condition only has to relate that segment to the already-joined tables. `JoinRelated` still infers conditions from foreign-key metadata and ANDs any explicit condition with the inferred one.
+- Join results (2 to 7 tables) support multi-parameter `Where` / `Select` / `OrderBy` / `OrderByDescending` / `ThenBy` / `ThenByDescending` / `GroupBy`, so you can name the tables directly: `Where((o, c) => o.Amount > 10 && c.Name == "VIP")`, `Select((o, c) => new { o.Id, c.Name })`, `OrderBy((o, c) => o.Amount)`, `GroupBy((o, c) => o.CustomerId)`; for more tables write `(o, c, r) => ...`. The extension rewrites each parameter to `x.Item1` through `x.Item7`, equivalent to the `x => x.Item1...` form.
+- Join aliases are assigned in order. When you build `SelectItemExpr` by alias, read them from `from.Source.Alias` and `from.Joins[i].Source.Alias` instead of hard-coding `T1`, since the outer query may already have used that number.
+- Whole-table projections such as `Select(x => x.Item1)` are not supported; list specific columns inside `Select`, for example `Select(x => new { x.Item1.Id, x.Item2.Name })`. Using a tuple element `x.Item1` directly as a column throws `NotSupportedException`.
+- After `Join` / `JoinRelated`, a following `Select` changes the element type, so the `TResult` of `Expr.Query<T, TResult>` can no longer be the joined tuple type; use `IEnumerable<object>` (or an interface compatible with the projection result) instead.
+
+`QuerySource<T>` implements `IQueryable<T>`, so a query can also be composed outside a lambda and handed to a DAO:
+
+```csharp
+// Resolve it straight from the container; the executor is already attached, no DAO lookup needed
+var users = serviceProvider.GetRequiredService<QuerySource<User>>();
+
+foreach (User user in users.Where(u => u.Age >= 18)) { }
+List<User> adults = users.Where(u => u.Age >= 18).ToList();
+
+// Async: Where returns IQueryable, so use AsSource to narrow back to QuerySource and call its async methods
+List<User> asyncAdults = await users.Where(u => u.Age >= 18).AsSource().ToListAsync();
+int count = await users.Where(u => u.Age >= 18).AsSource().CountAsync();
+
+await foreach (User u in users.Where(u => u.Age >= 18).AsSource().ToAsyncEnumerable()) { }
+
+// After a projection too; AsSource follows the Select element type
+List<string> names = await users.Where(u => u.Age >= 18)
+    .Select(u => u.Name)
+    .AsSource()
+    .ToListAsync();
+
+// Finish with GetQueryExpr() to turn the query into an Expr, no executor needed
+var expr = users.Where(u => u.Age >= 18).Select(u => new { u.Id, u.Name }).GetQueryExpr();
+
+// Or hand it to the DAO, which accepts any IQueryable source
+var dao = serviceProvider.GetRequiredService<ObjectViewDAO<User>>();
+var result = await dao.SearchAs(
+    users.Where(u => u.Age >= 18).Select(u => new { u.Id, u.Name })).ToListAsync();
+```
+
+An instance returned by `Expr.From<T>()` carries no executor and can only build an expression; enumerating it or calling `ToList` throws `InvalidOperationException` asking for an executor. A `QuerySource<T>` lives as long as its DAO, so do not cache it in a singleton or static field.
+
+## 6. Projection Queries (`SearchAs` / `SearchOneAs`)
+
+`SearchAs` / `SearchOneAs` have two overload families: one takes an IQueryable Lambda, the other an already composed `IQueryable<T>`. Both project the result into a target type (custom classes or anonymous types), which is convenient for "select only some columns" or "assemble view / summary objects".
+
+```csharp
+// IQueryable Lambda form
 List<UserSummary> summaries = userService.SearchAs(
     q => q.Where(u => u.Age >= 18)
           .Select(u => new UserSummary { UserName = u.UserName, Age = u.Age })
 );
 
-// Project to an anonymous type (column aliases match the anonymous member names)
+// Or compose the query with Expr.From<T>() and pass it straight in
 var anon = userService.SearchAs(
-    q => q.Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
+    Expr.From<User>().Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
 );
 
 // Filter without projection: TResult is inferred as the entity type
-List<User> adults = userService.SearchAs(q => q.Where(u => u.Age >= 18));
+List<User> adults = userService.SearchAs(Expr.From<User>().Where(u => u.Age >= 18));
 
 // Single record
 UserSummary? one = userService.SearchOneAs(
-    q => q.Where(u => u.Id == 1).Select(u => new UserSummary { UserName = u.UserName, Age = u.Age })
+    Expr.From<User>().Where(u => u.Id == 1).Select(u => new UserSummary { UserName = u.UserName, Age = u.Age })
 );
 ```
 
@@ -224,9 +367,13 @@ Async versions are `SearchAsAsync` / `SearchOneAsAsync`:
 var list = await userService.SearchAsAsync(
     q => q.Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
 );
+
+var list2 = await userService.SearchAsAsync(
+    Expr.From<User>().Where(u => u.Age >= 18).Select(u => new { u.UserName, u.Age })
+);
 ```
 
-> The `SearchAs` lambda is converted into a `SelectExpr` before execution (equivalent to the `SelectExpr` usage in [Query Overview](./query-overview.en.md#3-search-vs-searchas)). Result mapping is handled by `DataReaderConverter`: unregistered plain classes / anonymous types match by "member name ↔ column alias", while registered entity types match positionally — prefer DTO / anonymous-type projections. For sharded tables, pass the shard name via the `tableArgs` parameter.
+> `SearchAs` converts either the Lambda or the `IQueryable<T>` query into a `SelectExpr` before execution (equivalent to the `SelectExpr` usage in [Query Overview](./query-overview.en.md#3-search-vs-searchas)). Result mapping is handled by `DataReaderConverter`: unregistered plain classes / anonymous types match by "member name ↔ column alias", while registered entity types match positionally — prefer DTO / anonymous-type projections. For sharded tables, pass the shard name via the `tableArgs` parameter.
 
 ## 7. JsonNode Queries
 

@@ -3,6 +3,8 @@
 `Expr` 是 LiteOrm 的核心表达式对象模型，本文主要讲解如何构造、组合、复用和理解它的语义。
 如果你关心 Lambda / `Expr` / `ExprString` 的选型，请先看[查询总览](./query-overview.md)；Lambda 写法见 [Lambda 查询指南](./lambda-guide.md)，DAO 层手写 SQL 见 [ExprString 使用指南](./exprstring-guide.md)。
 
+> 日常固定条件优先写 Lambda / `QuerySource<T>`；本文的 `Expr` 示例面向动态拼装、跨层复用和需要 Expr 专属能力的场景。
+
 ## 1. 创建基础表达式
 
 ### 1.1 属性、值与常量
@@ -20,7 +22,7 @@ var constValue = Const("Enabled"); // 直接内嵌
 - `Prop(name)`：创建属性表达式
 - `Prop(alias, name)`：创建带表别名的属性表达式
 - `Value(obj)`：按参数传递，适合运行时值
-- `Const(obj)`：直接内嵌到 SQL，适合真正的常量
+- `Const(obj)`：直接内嵌到 SQL，适合写死不变的常量
 
 ### 1.2 比较、字符串与集合
 
@@ -49,6 +51,31 @@ var currentUserFilter = Sql("CurrentUserFilter");
 - `Func(name, args)`：普通函数
 - `Aggregate(name, expr, isDistinct)`：聚合函数包装
 - `Sql(key, arg)`：注册式动态 SQL 片段，适合运行时上下文过滤
+
+`Count`、`Sum`、`Average`、`Max`、`Min` 既可以在 IQueryable Lambda 里由解析器接管成聚合 SQL，也可以直接在 `QuerySource<T>` 上拼装或取数：
+
+```csharp
+// 用 IQueryable Lambda 直接解析成聚合 SQL
+var total = Expr.Query<Order, int>(q => q.Count());
+var amountSum = Expr.Query<Order, decimal>(q => q.Sum(o => o.Amount));
+var avgAmount = Expr.Query<Order, decimal>(q => q.Average(o => o.Amount));
+
+// 只要聚合段本身，也可以不用 Lambda，直接用结构性 Select 拼
+var countExpr = Expr.From(typeof(Order)).Select(Expr.Aggregate("COUNT", Expr.Const(1)));
+var sumExpr = Expr.From(typeof(Order)).Select(Expr.Aggregate("SUM", Expr.Prop("Amount")));
+
+// 标量子查询，参与比较时会自动加括号
+var aboveAverage = Expr.From<Order>()
+    .Where(o => o.Amount > Expr.From<Order>().Average(x => x.Amount))
+    .GetQueryExpr();
+
+// 绑定了执行器的查询源可以直接算
+var count = new QuerySource<Order>(dao).Where(o => o.Status == 1).Count();
+```
+
+`Expr.Query` 与 `Expr.From<T>()...GetQueryExpr()` 都是受支持的写法：前者适合 Join、根级聚合这类必须由 Lambda 解析器接管的形态，后者适合跨层拼装查询链。
+
+`Count()` 不带选择器时生成 `COUNT(1)`；带选择器则把选择器表达式整体作为聚合参数，因此 `x => x.Amount * x.Rate` 这类算式也可用。`Average` 与 `Avg` 都映射到 `AVG`。聚合生成的 `SelectExpr` 不带列别名，作为标量子查询使用时不会输出多余的 `AS`。
 
 ### 1.4 类型转换与条件值
 
@@ -178,12 +205,12 @@ public static LogicExpr BuildUserSearch(IReadOnlyDictionary<string, string?> que
 
 在 Lambda 中可用 `expr.To<bool>()` 把动态 `Expr` 嵌入条件；完整方法与取舍见 [Lambda 与 Expr 组合使用](./lambda-expr-mixing.md)。
 
-## 4. 用 `Expr.From<T>()` 链式构建查询
+## 4. 用 `Expr.From(type)` 链式构建查询
 
 ```csharp
 using static LiteOrm.Common.Expr;
 
-var query = From<User>()
+var query = From(typeof(User))
     .Where(Prop("Age") > 18)
     .GroupBy(Prop("DeptId"))
     .Having(Prop("Id").Count() > 5)
@@ -197,6 +224,12 @@ var query = From<User>()
 
 这是 `Expr` 最完整的用法：从 `FROM` 起点一路构造 `WHERE / GROUP BY / HAVING / SELECT / ORDER BY / 分页`。
 
+`From` 有两个重载，分工不同：
+
+- `Expr.From(type, tableArgs)` 接受 `Type`，返回 `TableExpr`，是唯一可以真实调用的工厂方法。
+- `Expr.From<T>(tableArgs)` 返回 `QuerySource<T>`，实现 `IQueryable<T>`。在 Lambda 表达式里由解析器接管；在 Lambda 外可以继续拼 `Where` / `Select` 等查询，链尾用 `GetQueryExpr()` 得到 `Expr`。未提供执行器时不能取数，枚举会抛 `InvalidOperationException`。
+- `Expr.FromRelated<T>(tableArgs)` 同样返回 `QuerySource<T>`，区别是写在 Lambda 里时会补上自动关联条件。
+
 ## 5. Expr 类型总览
 
 可以把 LiteOrm 里的 `Expr` 大致分成四层：
@@ -207,6 +240,14 @@ var query = From<User>()
 | 值表达式 | `ValueTypeExpr` | 能出现在列、函数、比较两侧、SELECT 项里的值 |
 | 逻辑表达式 | `LogicExpr` | 能出现在 WHERE / HAVING / EXISTS 条件里的布尔表达式 |
 | SQL 片段 | `SqlSegment` | `FROM / SELECT / WHERE / ORDER BY` 这一类链式 SQL 节点 |
+
+表达式走到 SQL，中间一共三段：`Expr` → `SqlSegment` → `PreparedSql`。全程不反射，拼接字符串也用池化缓冲。
+
+举个具体的。你写 `Expr.Prop("Age") > 18`，拿到手的是一条带占位符的 SQL，外加一个值为 18 的参数，18 不会以字面量形式出现在 SQL 文本里。注入就是从这一步被掐掉的。
+
+出口是 `ExprSqlConverter`：`Expr.ToSql(SqlBuildContext)`（`ExprSqlConverter.cs:128`）按表达式类型分发，该补括号的地方补上；`Expr.ToPreparedSql(SqlBuildContext)`（`:306`）把 SQL 文本和参数列表打包成 `PreparedSql`。
+
+`ValueStringBuilder` 是框架自己写的字符串构建器，`ref struct`，从 `ArrayPool<char>` 租缓冲，用完还回去。`SqlValueStringBuilder` 按 SELECT、FROM、WHERE 这些子句各持有几个。省 GC 主要靠这里。
 
 ### 5.1 ValueTypeExpr 体系
 
@@ -263,11 +304,13 @@ var query = From<User>()
 | `Expr.Value(value)` | 创建参数化值 | `Expr.Value(18)` |
 | `Expr.Const(value)` | 创建常量值 | `Expr.Const("Enabled")` |
 | `Expr.Null` | SQL NULL | `Expr.Null` |
-| `Expr.From<T>()` | 创建链式查询起点 | `Expr.From<User>()` |
+| `Expr.From(type)` | 创建链式查询起点（可真实调用） | `Expr.From(typeof(User))` |
+| `Expr.From<T>()` | 构造 `QuerySource<T>`，可作 Lambda 占位或拼 IQueryable 查询；无执行器时不能取数 | `Expr.From<User>()` |
+| `Expr.FromRelated<T>()` | 同 `Expr.From<T>()` 返回 `QuerySource<T>`，在 Lambda 内额外补上关联条件 | `Expr.FromRelated<Department>()` |
 | `Expr.Update<T>()` | 创建 UPDATE 表达式 | `Expr.Update<User>()` |
 | `Expr.Delete<T>()` | 创建 DELETE 表达式 | `Expr.Delete<User>()` |
-| `Expr.Exists<T>(innerExpr)` | 创建 EXISTS 子查询 | `Expr.Exists<Department>(...)` |
-| `Expr.ExistsRelated<T>(innerExpr)` | 创建自动关联 EXISTS 子查询 | `Expr.ExistsRelated<DepartmentView>(...)` |
+| `Expr.Exists(type, innerExpr)` | 创建 EXISTS 子查询 | `Expr.Exists(typeof(Department), ...)` |
+| `Expr.ExistsRelated(type, innerExpr)` | 创建自动关联 EXISTS 子查询 | `Expr.ExistsRelated(typeof(DepartmentView), ...)` |
 | `Expr.Lambda<T>(expr)` | 将 Lambda 转成 `LogicExpr` | `Expr.Lambda<User>(u => u.Age > 18)` |
 | `Expr.Func(name, args)` | 创建函数表达式 | `Expr.Func("COUNT", Expr.Prop("Id"))` |
 | `Expr.Aggregate(name, expr, isDistinct)` | 创建聚合函数表达式 | `Expr.Aggregate("COUNT", Expr.Prop("Id"), true)` |
@@ -276,6 +319,7 @@ var query = From<User>()
 | `Expr.Now()` | 当前时间戳 | `Expr.Now()` |
 | `Expr.Today()` | 当前日期 | `Expr.Today()` |
 | `Expr.Sql(key, arg)` | 动态 SQL 片段，结果可隐式转换为 `ValueTypeExpr` | `Expr.Sql("CurrentUserFilter")` |
+| `QuerySource<T>.GetQueryExpr()` | 把拼好的 IQueryable 查询链转成 `Expr`，不需要执行器 | `Expr.From<User>().Where(u => u.Age > 18).GetQueryExpr()` |
 | `Expr.Query<T>(expression)` | IQueryable Lambda 转 Expr | `Expr.Query<User>(...)` |
 | `Expr.Query<T, TResult>(expression)` | 带返回值的 IQueryable Lambda 转 Expr | `Expr.Query<User, int>(...)` |
 
@@ -391,7 +435,7 @@ var constExpr = Prop("Status") == Const(1); // 常量内嵌
 
 ### 7.5 与 `null` 比较
 
-`ValueTypeExpr` 是引用类型，`null` 可以直接作为 `operator ==` / `!=` 的右操作数传入，因此 `Prop("DeletedTime") == null` 是合法的——它会构造出一个右操作数为 `null` 引用的 `LogicBinaryExpr`。
+`ValueTypeExpr` 是引用类型，`null` 可以直接作为 `operator ==` / `!=` 的右操作数传入，因此 `Prop("DeletedTime") == null` 是合法的，它会构造出一个右操作数为 `null` 引用的 `LogicBinaryExpr`。
 
 SQL 转换层对 `Equal`/`NotEqual` 与 `null` 的组合做了特殊处理：当某一侧为 `null` 引用，或是 `ValueExpr` 且其 `Value` 为 `null` 时，会输出 `IS NULL` / `IS NOT NULL`，而不会输出 `= NULL`（后者在 SQL 中恒为假）。因此下面三种写法在生成结果上等价：
 
@@ -412,7 +456,7 @@ var expr3 = Prop("DeletedTime").IsNull();       // 同上，语义最清晰
 ```csharp
 using static LiteOrm.Common.Expr;
 
-var query = From<User>()
+var query = From(typeof(User))
     .OrderBy(("Age", false)); // (string property, bool ascending) -> OrderByItemExpr
 
 var update = Update<User>()
@@ -475,8 +519,9 @@ Lambda 中的三目运算符 `a ? b : c` 会自动解析成 `Expr.If(...)` 并�
 await dao.Search(u => Regex.IsMatch(u.Name!, @"\d+"));
 
 // SELECT REGEXP_REPLACE(Name, '\d+', '#')
-await dao.Search(Expr.Query<TestUser, IQueryable<object>>(q => q
-    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })));
+await dao.Search(Expr.From<TestUser>()
+    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })
+    .GetQueryExpr());
 
 // SELECT REGEXP_SUBSTR(Name, '\d+')  -- 提取首个匹配
 // SELECT REGEXP_INSTR(Name, '\d+') - 1  -- 匹配位置（0 基）
@@ -507,6 +552,15 @@ await dao.Search(Expr.Query<TestUser, IQueryable<object>>(q => q
 | `.OrderBy(props)` | ORDER BY |
 | `.Section(skip, take)` | 分页 |
 | `.Set(assignments)` | UPDATE SET |
+
+> 重复调用同一子句会在原表达式上继续编辑，而不是嵌套新的子句：
+> - `.Where(a).Where(b)` → 同一个 `WhereExpr`，条件按 AND 合并
+> - `.GroupBy(a).GroupBy(b)` → 同一个 `GroupByExpr`，分组字段追加
+> - `.Having(a).Having(b)` → 同一个 `HavingExpr`，条件按 AND 合并
+> - `.OrderBy(a).OrderBy(b)` → 同一个 `OrderByExpr`，排序项追加
+> - `.Section(0, 10).Section(5, 20)` → 同一个 `SectionExpr`，直接更新 `Skip` / `Take`
+>
+> `.Select(...)` 例外：它表示一次投影边界，重复调用会生成子查询；需要追加选择项时使用 `.SelectMore(...)`。
 
 ## 9. Equals 与组合语义
 

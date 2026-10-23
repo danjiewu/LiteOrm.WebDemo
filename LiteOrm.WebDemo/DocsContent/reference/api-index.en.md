@@ -61,13 +61,19 @@ Related guides:
 
 ### Query APIs
 
-- `Search` / `SearchAsync`
-- `SearchAs` / `SearchAsAsync` (including the `Expression<Func<IQueryable<T>, IQueryable<TResult>>>` Lambda projection extension)
+- `Search` / `SearchAsync` (including IQueryable Lambda and `IQueryable<T>` overloads)
+- `SearchAs` / `SearchAsAsync` (including the `Expression<Func<IQueryable<T>, IQueryable<TResult>>>` Lambda projection extension and `IQueryable<TResult>` overloads)
 - `SearchOne` / `SearchOneAsync`
 - `SearchOneAs` / `SearchOneAsAsync`
 - `Exists` / `ExistsAsync`
 - `Count` / `CountAsync`
-- `Expr`, `LogicExpr`, `SelectExpr`
+- `Expr`, `LogicExpr`, `SelectExpr`, `Expr.Query`
+- `QuerySource<T>` (returned by `Expr.From<T>()`; implements `IQueryable<T>` / `IOrderedQueryable<T>`) and `IQuerySourceExecutor<T>`
+- Multi-table sources `QuerySource<T1, T2>` ... `QuerySource<T1, ..., T7>`, each `Join<TNext>` appends one right table
+- `QuerySource<T>.Join<T2>(Expression<Func<T1, T2, bool>>, TableJoinType?)` / `JoinRelated<T2>(...)`; multi-table overloads take one condition parameter per table in the order "already-joined tables first, then the new right table"; `JoinRelated` matches from back to front in join order, with the main table last
+- `QuerySource<T>.GetQueryExpr()`, and `IQueryable<T>.GetQueryExpr()` / `AsSource()`
+- `LambdaExprExtensions` IQueryable overloads (`Search` / `SearchOne` / `SearchAsync` / `SearchOneAsync` / `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync`)
+- `DAOExtensions` IQueryable `Search` overloads for `IDataViewDAO<TInput>`
 - `SelectAll()` / `Cast(DbValueType)`
 - Lambda conditional operator `?:` (rendered as `CASE`)
 - case-insensitive expression names and aliases
@@ -171,6 +177,43 @@ Related guides:
 - [Permission filtering](../advanced-topics/permission-filtering.en.md)
 - [Logging and diagnostics](../di/logging.en.md)
 - [Remote service invocation](../advanced-topics/remote-service.en.md)
+
+## Source index
+
+Use this table when you need to change framework code or confirm where a behavior is implemented.
+
+| What you are looking for | File |
+|:---|:---|
+| Connection / transaction / command cache | `LiteOrm/DAOContext/DAOContext.cs` |
+| Connection pool and read-only replicas | `LiteOrm/DAOContext/DAOContextPool.cs` |
+| Data source to connection pool | `LiteOrm/DAOContext/DAOContextPoolFactory.cs` |
+| Session and connection binding | `LiteOrm/SessionManager/SessionManager.cs` |
+| DAO base class and command assembly | `LiteOrm/DAO/DAOBase.cs` |
+| Write DAO | `LiteOrm/DAO/ObjectDAO.cs` |
+| Read DAO | `LiteOrm/DAO/ObjectViewDAO.cs` |
+| Result wrapping | `LiteOrm/DAO/ResultTypes.cs` |
+| Command proxy | `LiteOrm/DbAccess/DbCommandProxy.cs` |
+| Reader lock holding | `LiteOrm/DbAccess/AutoLockDataReader.cs` |
+| Row to object mapping | `LiteOrm/Converter/DataReaderConverter.cs` |
+| Business service and events | `LiteOrm/Service/EntityService.cs` |
+| Manual entry point without DI | `LiteOrm/Classes/LiteOrmContext.cs` |
+| MS DI registration | `LiteOrm/Register/LiteOrmServiceExtensions.cs` |
+| Expression to SQL | `LiteOrm.Common/Converter/ExprSqlConverter.cs` |
+| Expression model | `LiteOrm.Common/Expr/Expr.cs` |
+| Metadata model | `LiteOrm.Common/MetaData/TableDefinition.cs` |
+| Attributes to metadata | `LiteOrm.Common/MetaData/AttributeTableInfoProvider.cs` |
+| SQL dialect base class | `LiteOrm/SqlBuilder/SqlBuilder.cs` |
+
+## Extension points at a glance
+
+| What you want to change | Where to start |
+|:---|:---|
+| Add a database dialect | Inherit `SqlBuilder` and register `SqlBuilderType` (see [Custom SqlBuilder](../extensibility/custom-sqlbuilder.en.md)) |
+| Change value conversion | Implement `IDbValueConverter` and register it globally; per-column use `ConverterType` (see [Data Mapping](../advanced-topics/data-mapping.en.md)) |
+| Add a custom expression | Extend an `Expr` subclass, add an `ExprType`, and add dispatch in `ExprSqlConverter` |
+| Replace the metadata source | `TableInfoProvider.Set(factory)` |
+| Hook before and after writes | Implement `IEntityServiceEvent<T>` and register it (see [Audit and Change Tracking](../typical-applications/audit-and-change-tracking.en.md)) |
+| Pre-register mapping under AOT | `DataReaderConverter.RegisterMapper<T>()`, usually emitted by the source generator (see [AOT Support](../advanced-topics/aot.en.md)) |
 
 ## Related links
 

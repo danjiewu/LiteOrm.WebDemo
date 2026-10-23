@@ -61,6 +61,8 @@ LambdaExprConverter.RegisterMethodHandler(typeof(string));
 
 这里的 `"Format"` 只是一个示例方法名。实际项目里更推荐写成 `nameof(SomeType.SomeMethod)`，这样重构时不容易漏改。
 
+按声明类型注册时支持开放泛型：解析会先匹配特化类型（如 `QuerySource<User>`），未命中再回退到泛型定义（如 `typeof(QuerySource<>)`），因此同一泛型类型注册一次即可覆盖它的所有构造类型。
+
 **参数说明**：
 
 | 参数           | 类型                                                      | 说明   |
@@ -81,9 +83,14 @@ LambdaExprConverter.RegisterMemberHandler("Length", handler);
 
 // 注册特定类型的成员处理器
 LambdaExprConverter.RegisterMemberHandler(typeof(User), "Age", handler);
+
+// 仅挂默认处理器（memberName 为 null 时登记为该类型的成员兜底）
+LambdaExprConverter.RegisterMemberHandler(typeof(User));
 ```
 
 这里的 `"Length"` 同样只是示例成员名；如果是自己定义的成员，优先使用 `nameof(SomeType.SomeProperty)` 更稳妥。
+
+只给类型时不扫描成员，而是登记一条类型级兜底，在解析到该类型的成员访问时才接管（与 `RegisterMethodHandler(typeof(SomeType))` 的批量注册对称）。要让整类成员走同一个自定义处理器，用命名参数只传 `handler`：`RegisterMemberHandler(typeof(User), handler: MyHandler)`，处理器里可以读 `node.Member.Name` 区分成员。按成员名统一映射的典型用法是把 POCO 的每个属性映射成同名的 JSON 路径，写法见[对象的 JSON 列存储与字段查询](../typical-applications/json-column-mapping.md#需求二按对象里的字段过滤)。显式指定成员的注册（按类型或按成员名）优先于类型级兜底，两者先后顺序无关，要改写某个成员单独注册它即可。
 
 ## 3. SqlBuilder 方法
 
@@ -504,8 +511,9 @@ var users = await userService.SearchAsync(u => u.CreateTime.AddDays(7) > DateTim
 // 正则表达式匹配（REGEXP_LIKE）
 var users = await userService.SearchAsync(u => Regex.IsMatch(u.UserName!, @"\d+"));
 // 正则替换（REGEXP_REPLACE）
-var dt = await dao.Search(Expr.Query<TestUser, IQueryable<object>>(q => q
-    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })));
+var dt = await dao.Search(Expr.From<TestUser>()
+    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })
+    .GetQueryExpr());
 ```
 
 ## 11. 默认注册的 SqlFunction（跨数据库）

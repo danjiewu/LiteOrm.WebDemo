@@ -1,8 +1,46 @@
 # NativeAOT 支持
 
-LiteOrm 具备完善的 NativeAOT 兼容能力。开启 `PublishAot` 后，编译期由 `LiteOrm.Generators` 源生成器完成所有需要运行期反射/动态编程的工作，从而避免裁剪（trimming）与动态代码（AOT）相关告警，保证在无 JIT 环境下端到端可用。本工程内的 `LiteOrm.AotDemo` 即为完整的端到端验证示例。
+`LiteOrm` 与 `LiteOrm.Common` 可以在 NativeAOT 下发布。开启 `PublishAot` 后，编译期由 `LiteOrm.Generators` 源生成器接替运行期反射与 `Expression.Compile()` 的工作，运行期不再依赖动态代码，裁剪告警也随之清零。仓库里的 `LiteOrm.AotDemo` 是端到端验证示例，覆盖单表 CRUD、实体关联、投影聚合、JSON 与计算列、事务与固定过滤五类场景。
 
 > 注意：`LiteOrm.DependencyInjection` 基于 Autofac / Castle DynamicProxy，依赖运行时反射与动态程序集生成，**不支持 NativeAOT**。AOT 场景请使用基础库 `AddLiteOrm()` 进行纯 MS DI 注册。
+
+本文讲两件事：NativeAOT 与 JIT 的用法差在哪里，以及迁过去之前要注意什么。
+
+## 与 JIT 的差别
+
+业务代码两种模式下一样写。差别全在框架内部。同一件事，两种做法：
+
+| 维度 | JIT（普通发布） | NativeAOT |
+|------|--------------|-----------|
+| 表元信息 | `AttributeTableInfoProvider` 运行期读特性，反射建列模型 | 编译期生成 `TableInfo`（含关联信息），注册进 `CommonTableInfoProvider` |
+| DataReader 映射 | 运行期 `Expression.Compile()` 编译委托 | 编译期生成静态委托，经 `RegisterMapper<T>` 预注册 |
+| 属性访问 | 表达式树编译访问器 | 编译期生成访问器委托 |
+| `SqlBuilder` / `DbConnection` 派生类型 | 运行期按类型名解析 | 编译期枚举派生类型，预注册到 `TypeResolverHelper` |
+| `[AutoRegister]` 服务 | 运行时扫程序集注册 | 编译期生成 MS DI 注册代码，模块初始化器登记 |
+| DI 线路 | `AddLiteOrm()` 或 `RegisterLiteOrm()` | 只能 `AddLiteOrm()`，且没有 AOP |
+| 远程调用 | `LiteOrm.Remote` 可用 | `LiteOrm.Remote` / `LiteOrm.Remote.Server` 不可用 |
+| 首次查询 | 现场编译映射委托 | 直接用生成好的委托 |
+
+```mermaid
+flowchart TB
+    APP[业务代码：DAO / Service / Expr]
+    APP --> MODE{构建模式}
+    MODE -->|默认| JIT[JIT：运行期干活]
+    MODE -->|PublishAot=true| AOT[NativeAOT：编译期干活]
+    JIT --> J1[AttributeTableInfoProvider 读特性]
+    JIT --> J2[Expression.Compile 编译映射委托]
+    JIT --> J3[按类型名解析 SqlBuilder 与连接]
+    AOT --> A1[CommonTableInfoProvider 注册 TableInfo]
+    AOT --> A2[RegisterMapper 预注册映射]
+    AOT --> A3[TypeResolverHelper 预注册类型]
+```
+
+四条值得单独说：
+
+- **元数据换了一个 Provider，装的东西一样多。** JIT 下 `AttributeTableInfoProvider` 在首次访问某个实体时读特性，用反射建出列模型，再把 `[TableJoin]` / `[ForeignType]` / `[ForeignColumn]` 建成 `TableView.JoinedTables`。AOT 下这份工作整体前移到编译期：源生成器把这些特性一起写进 `TableInfo`，运行期由 `CommonTableInfoProvider` 装配出结构相同的 `TableDefinition` 与 `TableView`（含 `JoinedTable`、`ForeignColumn`、外键链上的 `Used` 标记）。`[Column(Constant = ...)]` 也一并落进 `ColumnInfo.Constant`，运行期拼出与 JIT 相同的 `TableDefinition.ConstFilter`。
+- **读取映射有三条路径，快慢取决于有没有生成代码。** 标注 `[Table]` 的实体在 AOT 构建下由源生成器产出静态委托。投影类型和匿名类型没有生成代码，AOT 下退到 `AotMapper` 反射路径。JIT 下所有类型都走表达式树编译。
+- **装箱只发生在确实需要它的地方。** 命中列级转换器的列走 `GetValue()` 加非泛型委托，这一列有装箱。没有转换器的列在生成代码里直接写死类型化读取，不装箱。反射路径统一 `GetValue()` 加 `SetValue`，每列都装箱。
+- **AOP 没有了。** `[Transaction]` / `[ServicePermission]` / `[ServiceLog]` 靠 Castle 动态代理实现，NativeAOT 下不可用。事务可以改用手工事务 API。权限过滤改用运行时 `Expr`。日志改用服务事件。
 
 ## 工程开关
 
@@ -14,32 +52,170 @@ LiteOrm 具备完善的 NativeAOT 兼容能力。开启 `PublishAot` 后，编�
   <TrimMode>full</TrimMode>
   <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
 </PropertyGroup>
-
-<ItemGroup>
-  <!-- 将源生成器作为 Analyzer 引用 -->
-  <ProjectReference Include="..\LiteOrm.Generators\LiteOrm.Generators.csproj"
-                    OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-</ItemGroup>
 ```
+
+- 源生成器只认构建属性：`IsAotCompatible`、`PublishAot`、`PublishTrimmed`、`IsTrimmable` 任意一个为 `true` 都会触发生成，不必等到 `dotnet publish`。非 AOT 构建不生成代码，走反射路径。
+- 生成器由 `LiteOrm.Common` 打包（`analyzers/dotnet/cs`）。NuGet 方式引用 `LiteOrm` 或 `LiteOrm.Common` 即自动带入，不需要手写 `ProjectReference`。`LiteOrm.AotDemo` 里那条显式引用，是为了在源码树内直接编译生成器工程。
+- `EmitCompilerGeneratedFiles` 只影响调试，用来把生成代码落到磁盘上核对，发布时可以去掉。
 
 ## 源生成器在编译期提供的能力
 
-1. **表元信息**：为每个 `[Table]` 实体生成 `TableInfo` 并注册到 `CommonTableInfoProvider`。AOT 下表元信息一律由 `CommonTableInfoProvider` 承载，运行时与 AOT 行为一致。
-2. **DataReader 映射委托**：为每个实体生成 `RegisterMapper<T>` 映射。映射为**每个实体一次性初始化所有列转换器**（静态方法 + 初始化标记位，惰性触发），随后**逐行直接复用缓存的转换器**并按 `GetValue` 方式读取，避免运行期 `Expression.Compile()` 与重复解析。
-3. **属性访问器 / SQL 构建器 / 连接类型**：`ObjectBase` 属性访问、`SqlBuilder` 派生与 `DbConnection` 派生类型均预注册到 `TypeResolverHelper`。
+1. **表元信息**：为每个 `[Table]` 实体生成 `TableInfo` 并注册到 `CommonTableInfoProvider`。列定义之外，类级 `[TableJoin]`、列级 `[ForeignType]` 与 `[ForeignColumn]` 也一并落进元数据，因此关联视图在 AOT 下与 JIT 表现一致。多个程序集共享同一个单例，不会互相覆盖。
+2. **DataReader 映射委托**：为每个实体生成 `RegisterMapper<T>` 映射，映射里每个实体一次性初始化所有列转换器（静态方法加初始化标记位，惰性触发），随后逐行复用缓存的转换器，没有转换器的列直接走类型化读取，从而避免运行期 `Expression.Compile()` 与重复解析。
+3. **属性访问器与类型注册**：`ObjectBase` 属性访问、`SqlBuilder` 派生与 `DbConnection` 派生类型均预注册到 `TypeResolverHelper`，运行期按名字就能拿到类型。
 4. **DI 注册**：带 `[AutoRegister]` 的服务在编译期生成 MS DI 注册代码。
 
 其中 `CommonTableInfoProvider` 对列级转换器（`DbValueConverter`）进行惰性解析并回填（`SqlTable.EnsureConverters`，仅初始化一次）。
 
-## 规则与约束
+生成内容可以用程序集级的 `LiteOrmCodeGen` 细粒度控制：
 
-- **复杂类型需显式 `[Column]`**：数组/集合、自定义类（`Object`）等复杂类型属性，未标注 `[Column]` 时不会被自动识别为表列；需显式 `[Column]`（并按需指定 `DbType = Array`）才会持久化。`Json`/`Jsonb` 映射类型已支持自动生成列。
-- **转换器需显式声明或预注册**：复杂/自定义转换须通过列级 `Column.ConverterType`、`ForeignColumn.ConverterType` 声明，或经 `SqlBuilder.RegisterDbValueConverter` 预注册；`Column.ConverterType` 需提供实现 `IDbValueConverter` 的转换器类型。声明了 `ForeignColumn.ConverterType` 的列在读取时优先使用自身转换器，否则回退目标列。
-- 避免在实体/转换链路中引入无法被源生成器覆盖的运行期反射。
+```csharp
+[assembly: LiteOrm.Common.LiteOrmCodeGen(
+    LiteOrm.Common.LiteOrmCodeGenKind.TableInfo |
+    LiteOrm.Common.LiteOrmCodeGenKind.DataReaderMappers)]
+```
+
+`Kinds` 可取 `TableInfo` / `DataReaderMappers` / `PropertyAccessors` / `AotTypeRegistration` / `AutoRegister`。声明了它，就以定义为唯一依据，不再看构建属性。未声明时按 AOT 状态自动全量生成。在普通构建里显式声明，可以提前验证 AOT 兼容性。
+
+## 注意事项
+
+迁到 NativeAOT 之前，逐条对照下面几项。
+
+1. **关联链上每一级都要有元数据。** `[ForeignColumn]` 的目标列只在**已注册 `TableInfo`** 的类型里找。目标是另一个程序集的实体、而那个程序集没开源生成时，会报「target column does not exist in joined tables」。两跳以上的链还要在中间那跳标 `AutoExpand = true`，否则下一级关联表不会被展开。
+2. **服务生命周期要用 `Scoped`。** `[AutoRegister]` 默认是 `Singleton`，而 `SessionManager` 与 DAO 都是 `Scoped`。实体服务若按默认注册，会在根容器里再解析出一个会话，事务、连接复用、`SessionManager.Current` 全都对不上号，典型症状是事务里抛异常但数据没回滚，或者报 `database is locked`。实体服务一律写 `[AutoRegister(Lifetime.Scoped)]`。
+3. **`Column.Constant` 的三种写法都可用。** `Constant = RecordState.Enabled`、`Constant = 1`、`Constant = "Enabled"` 都能对齐到枚举属性。AOT 下源生成器把值写进 `ColumnInfo.Constant`，运行期按属性类型解析后并进 `TableDefinition.ConstFilter`，与 JIT 结果一致。运行期仍可直接改 `TableDefinition.ConstFilter` 临时收紧可见范围（例如切换租户），值用 `GenericSqlExpr` 承载。
+4. **复杂类型需显式 `[Column]`。** 数组/集合、自定义类（`Object`）等复杂类型属性，未标注 `[Column]` 时不会被自动识别为表列；需显式 `[Column]`（并按需指定 `DbType = Array`）才会持久化。`Json`/`Jsonb` 映射类型已支持自动生成列。
+5. **列自动映射可整体关闭。** `[Table(AutoGenerateColumns = false)]` 时源生成器只收集显式标注 `[Column]` 的属性，未标注的属性不进表定义，与运行时 `AttributeTableInfoProvider` 行为一致。
+6. **转换器需显式声明或预注册。** 复杂或自定义转换须通过列级 `Column.ConverterType`、`ForeignColumn.ConverterType` 声明，或经 `SqlBuilder.RegisterDbValueConverter` 预注册，只靠全局注册不够，源生成器要看到特性才会为该列生成读取代码。转换器必须有公共无参构造函数，源生成器直接 `new`。要注入配置或密钥的组件改用静态初始化或环境变量。
+7. **一个实体只缓存一份读取委托**，由首次绑定的数据源方言决定。由于这份委托是首次访问时按当时方言编译的，同一实体在多个数据源间动态切换时，要么保证各库该实体的列 `DbValueType` 一致，要么为不同数据源用专属实体，要么在启动期用 `DataReaderConverter.RegisterMapper<T>` 固定读取规则。
+8. **性能预期放平。** 源生成器路径省掉了反射与运行期编译，比纯反射快，但反射兜底路径和匿名类型投影仍有装箱与反射调用，整体仍低于 JIT 的类型化读取。差距集中在逐行查询上，写入与批量操作几乎无感。
+9. **投影类型尽量用已知强类型。** 匿名类型在 AOT 下走 `AotMapper` 反射路径，能用但更慢，且要求目标类型的构造函数与属性在裁剪后仍然保留。
+## 实体关联
+
+关联的声明方式与 JIT 完全一样，写法和限制见[实体映射](../core-usage/entity-mapping.md)。下面这段取自 `LiteOrm.AotDemo`：订单属于用户，用户属于部门，部门还有上级部门。
+
+```csharp
+[Table("AotDepartments")]
+[TableJoin(typeof(AotDepartment), "ParentId", Alias = "Parent")]
+public class AotDepartment : ObjectBase
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+    [Column("Name")]
+    public string? Name { get; set; }
+    [Column("ParentId")]
+    public int? ParentId { get; set; }
+}
+
+// 视图上声明投影列，Foreign 用 [TableJoin] 里起的别名
+public class AotDepartmentView : AotDepartment
+{
+    [ForeignColumn("Parent", Property = nameof(AotDepartment.Name))]
+    public string? ParentName { get; set; }
+}
+```
+
+订单通过外键列挂到用户，`AutoExpand = true` 让这条链再往下走一跳，于是视图上可以直接投影「部门名」：
+
+```csharp
+[Table("AotOrders")]
+public class AotOrder : ObjectBase
+{
+    [Column("Id", IsPrimaryKey = true, IsIdentity = true)]
+    public int Id { get; set; }
+    [Column("UserId")]
+    [ForeignType(typeof(AotUser), Alias = "User", AutoExpand = true)]
+    public int UserId { get; set; }
+    [Column("Amount")]
+    public double Amount { get; set; }
+    [Column("AmountWithTax", Expression = "{Amount} * 1.1")]
+    public double AmountWithTax { get; set; }
+}
+
+public class AotOrderView : AotOrder
+{
+    [ForeignColumn("User", Property = nameof(AotUser.UserName))]
+    public string? UserName { get; set; }
+    // 目标类型直接给 Type，别名取类型名；靠上游的 AutoExpand 才能 join 到 Dept
+    [ForeignColumn(typeof(AotDepartment), Property = nameof(AotDepartment.Name))]
+    public string? DeptName { get; set; }
+}
+```
+
+编译期生成的东西长这样（`EmitCompilerGeneratedFiles` 落盘的 `TableInfo.g.cs`）：
+
+```csharp
+new ColumnInfo
+{
+    PropertyName = "UserId",
+    // ...
+    ForeignTables = new ForeignTable[]
+    {
+        new ForeignTable { ForeignType = typeof(AotUser), Alias = "User", AutoExpand = true },
+    },
+},
+// ...
+new ColumnInfo
+{
+    PropertyName = "DeptName",
+    // ...
+    ForeignColumn = new ForeignColumnInfo { ForeignAlias = "Dept", Property = "Name" },
+},
+```
+
+`TableInfo.JoinedTables` 同样会被填上（自关联那条对应 `Alias = "Parent"`、`ForeignKeys = "ParentId"`）。运行期 `CommonTableInfoProvider` 拿这些数据走一遍与 `AttributeTableInfoProvider` 相同的装配流程，产出带 `JoinedTable` 的 `TableView`。
+
+业务代码照旧，`SearchAsync()` 不传条件就会把视图列和关联表都带上：
+
+```csharp
+var orders = await orderService.SearchAsync();
+foreach (var order in orders)
+    Console.WriteLine($"{order.Id} {order.Amount} {order.UserName} {order.DeptName} {order.AmountWithTax:0.##}");
+
+// 关联列可以直接参与过滤、排序、分页，Lambda 写法同样可用
+var expr = Expr.From(typeof(AotOrderView))
+    .Where(Expr.Prop(nameof(AotOrderView.DeptName)) == Expr.Const("研发部"))
+    .OrderBy(Expr.Prop(nameof(AotOrder.Amount)).Desc())
+    .Section(0, 2);
+var page = await orderService.SearchAsync(expr);
+var lambda = await orderService.SearchAsync(Expr.From<AotOrderView>().Where(x => x.DeptName == "研发部"));
+```
+
+生成的 SQL：
+
+```sql
+SELECT "User"."UserName", "Dept"."Name" AS "DeptName",
+       "T0"."Id", "T0"."UserId", "T0"."Amount", "T0"."AmountWithTax" ...
+FROM "AotOrders" "T0"
+LEFT JOIN "AotUsers" "User" ON "T0"."UserId" = "User"."Id"
+LEFT JOIN "AotDepartments" "Dept" ON "User"."DeptId" = "Dept"."Id"
+WHERE "Dept"."Name" = '研发部'
+```
 
 ## 完整 CRUD 与 SearchAs 示例
 
-`LiteOrm.AotDemo` 演示了完整 CRUD（含批量插入/更新、`UpdateOrInsert`、`UpdateAll`、各种删除）与 `SearchAs`/`SearchOneAs`（同步 + 异步）的调用方式：
+`LiteOrm.AotDemo` 的入口只做两件事：装配容器、按顺序跑场景。
+
+```csharp
+var services = new ServiceCollection();
+services.AddLogging(b => b.SetMinimumLevel(LogLevel.Warning));
+services.AddSingleton<IConfiguration>(configuration);
+services.AddLiteOrm();
+
+using var provider = services.BuildServiceProvider();
+using var scope = provider.CreateScope();
+var sp = scope.ServiceProvider;
+
+DemoData.Reset(sp);                              // 清库 + 写入部门/用户/订单
+
+await CrudScenario.RunAsync(sp);                 // 单表 CRUD
+await AssociationScenario.RunAsync(sp);          // 实体关联
+await ProjectionScenario.RunAsync(sp);           // 投影与聚合
+await JsonAndComputedScenario.RunAsync(sp);      // JSON 列与计算列
+await TransactionAndFilterScenario.RunAsync(sp); // 事务与固定过滤
+```
+
+场景代码按主题拆在 `LiteOrm.AotDemo/Scenarios/` 下。单表 CRUD 覆盖同步与异步、单条与批量、实体更新与条件更新、三种删除：
 
 ```csharp
 // 实体（AotUser）与视图（AotUserView，含生成的 DataReader 映射）
@@ -52,18 +228,31 @@ public class AotUser : ObjectBase
     public string? UserName { get; set; }
     [Column("Age")]
     public int Age { get; set; }
+    [Column("Role")]
+    public UserRole? Role { get; set; }
     [Column("CreateTime")]
     public DateTime CreateTime { get; set; }
     [Column("Guid")]
     public Guid Guid { get; set; }
+    [Column("Info")]
+    public JsonNode? Info { get; set; }
+    [Column("Duration")]
+    public TimeSpan Duration { get; set; }
+    [Column("DeptId")]
+    [ForeignType(typeof(AotDepartment), Alias = "Dept", AutoExpand = true)]
+    public int? DeptId { get; set; }
 }
-public class AotUserView : AotUser { }
+public class AotUserView : AotUser
+{
+    [ForeignColumn("Dept", Property = nameof(AotDepartment.Name))]
+    public string? DeptName { get; set; }
+}
 
-// Service
+// Service：生命周期必须是 Scoped
 public interface IAotUserService : IEntityService<AotUser>, IEntityServiceAsync<AotUser>,
     IEntityViewService<AotUserView>, IEntityViewServiceAsync<AotUserView> { }
 
-[AutoRegister]
+[AutoRegister(Lifetime.Scoped)]
 public class AotUserService(IServiceProvider sp) : EntityService<AotUser, AotUserView>(sp), IAotUserService { }
 ```
 
@@ -99,7 +288,7 @@ userService.DeleteID(alice.Id);    // 按主键
 var nd = await userService.DeleteAllAsync(Expr.Prop("UserName") == "frank");
 ```
 
-完整代码见 [AotDemo/Program.cs](../../LiteOrm.AotDemo/Program.cs)。完整发布命令示例：
+完整代码见 [AotDemo/Program.cs](../../LiteOrm.AotDemo/Program.cs) 与 [AotDemo/Scenarios](../../LiteOrm.AotDemo/Scenarios)。完整发布命令示例：
 
 ```bash
 dotnet publish LiteOrm.AotDemo/LiteOrm.AotDemo.csproj -c Release -r win-x64 --self-contained
@@ -109,4 +298,6 @@ dotnet publish LiteOrm.AotDemo/LiteOrm.AotDemo.csproj -c Release -r win-x64 --se
 
 - [实体映射](../core-usage/entity-mapping.md)
 - [视图模型与服务](../core-usage/view-models-and-services.md)
-- [关联查询](../core-usage/associations.md)
+- [数据映射与值转换](./data-mapping.md)
+- [多租户隔离](../typical-applications/tenant-isolation.md)
+- [性能优化](./performance.md)

@@ -1,10 +1,74 @@
 # 变更日志 (Changelog)
 
-## v8.1.11 (2026-09-29)
+## v8.1.13 (2026-10-22)
+
+### 破坏性变更
+
+- **`Expr.From<T>()` / `Expr.FromRelated<T>()` 返回 `QuerySource<T>`**（`LiteOrm.Common`）：返回类型由 `TableExpr` / `IEnumerable<T>` 改为本版新增的 `QuerySource<T>`；`Expr.From(Type)` 行为不变。
+
+- **删除冗余的 Lambda 泛型重载**（`LiteOrm.Common`）：`Expr.Exists<T>(LogicExpr, ...)` 与 `Expr.ExistsRelated<T>(LogicExpr?, ...)` 删除，`ISourceAnchor.Where<T>(Expression<Func<T, bool>>)` 一并删除。
+
+- **删除 `TableRef` 抽象类**（`LiteOrm.Common`）：`JoinedTable` 改为直接继承 `SqlObject`，`ColumnRef.Table` 与双参构造函数的参数类型由 `TableRef?` 改为 `JoinedTable?`。
+
+### 新特性
+
+- **新增 `QuerySource<T>` 查询源**（`LiteOrm.Common` / `LiteOrm`）：实现 `IOrderedQueryable<T>`，可在 Lambda 外拼查询；传入执行器（`IQuerySourceExecutor<T>`，由 `ObjectViewDAO<T>` 实现）即可直接取数。`Where` / `Select` 之后用 `AsSource()` 收窄回 `QuerySource<T>` 可继续调用异步方法。`GetQueryExpr()` 把拼好的查询链转成 `Expr`，不需要执行器，`IQueryable<T>` 上另有同名扩展覆盖 `OrderBy` 之后的静态类型。`ObjectViewDAO<T>` 相应新增 `SearchAs(IQueryable<TResult>)` / `Search(IQueryable<T>)` 重载。
+
+- **新增接收 `IQueryable` 的查询重载**（`LiteOrm.Common` / `LiteOrm`）：`LambdaExprExtensions` 新增 8 个 `IQueryable<T>` / `IQueryable<TResult>` 重载（`Search` / `SearchOne` / `SearchAsync` / `SearchOneAsync` / `SearchAs` / `SearchOneAs` / `SearchAsAsync` / `SearchOneAsAsync`），`DAOExtensions` 为 `IDataViewDAO<TInput>` 新增带 / 不带 `propertyNames` 的 `Search` 重载。查询可用 `Expr.From<T>()` 起链后直接传入，也可继续使用原有的 IQueryable Lambda 写法。`Expr.Query` 与这些 Lambda 方法均保持可用，本版未标记过期。
+
+- **方法处理器支持泛型定义**（`LiteOrm.Common`）：`LambdaExprConverter` 先按特化类型、后按泛型定义查找已注册的处理器。
+
+- **Lambda 支持根级聚合函数**（`LiteOrm.Common`）：`Count`、`LongCount`、`Sum`、`Average`、`Avg`、`Max`、`Min` 在 IQueryable Lambda 内直接解析。
+
+- **新增 `Join` / `JoinRelated` 与多值泛型查询源**（`LiteOrm.Common`）：`Expr.From<T1>()` 返回 `QuerySource<T1>`，其上提供实例方法 `Join<T2>`、`JoinRelated<T2>()` 与 `JoinRelated<T2>(on)`，只写右表类型。新增 `QuerySource<T1, T2>` … `QuerySource<T1, ..., T7>` 多值泛型，每次 `Join<TNext>` 只追加一张右表并返回下一元数，例如 `QuerySource<T1, T2>.Join<T3>` 得到 `QuerySource<T1, T2, T3>`；结果元组始终平铺，`on` 参数按顺序一表一个（已连接的各表在前，新右表在最后）。连接结果可按 `IEnumerable<(T1, ..., Tn)>` 接 `Where` / `OrderBy`；接 `Select` 时元素类型会变化，`TResult` 需写成与投影结果兼容的类型（如 `IEnumerable<object>`）。`x.Item1` / `x.Item2` 等还原到各表别名，不再被当成名为 `Item1` 的列。连接既可在 Lambda 内解析，也可在 Lambda 外直接拼表达式。
+
+- **`LambdaExprConverter` 支持嵌套参数上下文**（`LiteOrm.Common`）：新增带父转换器的构造重载，子转换器继承外层参数映射并共享别名编号；构造函数注册 Lambda 的全部参数，`param[0]` 为别名 `T0` 的根表，其余参数获得新别名 `T{n}`。
+
+- **AOT 下生成关联元数据与常量过滤**（`LiteOrm.Common` / `LiteOrm.Generators`）：`[TableJoin]`、`[ForeignType]`、`[ForeignColumn]` 由 `TableInfoGenerator` 编译期写入 `TableInfo.JoinedTables` 与 `ColumnInfo.ForeignTables` / `ForeignColumn`，`[Column(Constant = ...)]` 渲染成字面量写入 `ColumnInfo.Constant`；运行期 `CommonTableInfoProvider` 据此装配完整的 `TableView` 与 `TableDefinition.ConstFilter`，与 JIT 结构一致。
+
+### 修复
+
+- **修复内层 Lambda 同名参数遮蔽外层参数**（`LiteOrm.Common`）：嵌套 Lambda 参数与外层同名时，转换完成后按参数名删除映射，导致外层引用失效（`ConvertParameter` 返回 null、`((IArged)u).TableArgs` 赋值被跳过）。随参数作用域改按引用键控一并修复。
+
+***
+
+## v8.1.12 (2026-10-16)
+
+### 破坏性变更
+
+- **Lambda 删除扩展方法更名为 `DeleteAll` / `DeleteAllAsync`**（`LiteOrm.Common`）：`LambdaExprExtensions` 的 `Delete`、`DeleteAsync` 分别更名为 `DeleteAll`、`DeleteAllAsync`，与 `IEntityService<T>.DeleteAll(LogicExpr)` 命名保持一致。
+
+### 新特性
+
+- **`[Table]` 新增 `AutoGenerateColumns`**（`LiteOrm.Common`）：默认 `true`，未标注 `[Column]` 的标量属性自动映射为列；设为 `false` 时只有显式标注 `[Column]` 的属性才映射为列，`[Column(false)]` 与 `[ForeignColumn]` 的语义不变。运行时（`AttributeTableInfoProvider`）与 AOT 源生成器（`TableInfoGenerator`）行为一致。
+
+- **`Expr.Delete<T>` 支持 Lambda 条件**（`LiteOrm.Common`）：新增 `Expr.Delete<T>(Expression<Func<T, bool>>? whereExpression)` 重载，可由 Lambda 条件直接构造 `DeleteExpr`；并新增 `Expr.Delete(Type objectType, LogicExpr? whereExpr, params string[] tableArgs)` 重载，用于以 `LogicExpr` 构造删除表达式。
 
 ### 改进
 
-- **`ExprString` 与 `RawSql` 移入 `LiteOrm.Common`**（`LiteOrm.Common`）：两者原在 `LiteOrm` 包中，现随表达式基础设施一并下移。命名空间仍为 `LiteOrm.Common`，引用方的 `using` 与调用方式无需改动。
+- **`Expr.Update<T>` 的 WHERE 条件改为可选**（`LiteOrm.Common`）：`whereExpression` 参数允许为 `null`，可在无 WHERE 条件下构造 `UpdateExpr`。
+
+### 修复
+
+- **修复单表 UPDATE / DELETE 中表别名无法解析的 bug**（`LiteOrm.Common`）：Lambda 条件经 `Expr.Exists` 等嵌套 Lambda 引用外层参数，以及 Lambda 构造 `UpdateExpr` / `DeleteExpr` 时，属性表别名统一改用目标表名限定（替换时机提前到处理 WHERE 条件与赋值之前），不再渲染单表语句中不存在的默认别名 `T0`。
+
+***
+
+## v8.1.11 (2026-09-29)
+
+### 新特性
+
+- **`RegisterMemberHandler` 支持按类型注册**（`LiteOrm.Common`）：新增 `RegisterMemberHandler(Type type, string? memberName = null, handler)` 重载，`memberName` 传 null 时按类型登记成员兜底，显式指定成员的注册优先。
+
+### 改进
+
+- **`ExprString` 与 `RawSql` 移入 `LiteOrm.Common`**（`LiteOrm.Common`）：随表达式基础设施一并下移，命名空间不变，引用方无需改动。
+
+### 修复
+
+- **修正 MySQL 的 `CAST` 类型名**（`LiteOrm`）：`MySqlBuilder` 覆盖 `GetSqlTypeName`，整型渲染为 `SIGNED` / `UNSIGNED`、字符串与 Guid 渲染为 `CHAR`。OceanBase、TiDB、GreatDB 一并修正。
+
+- **修复数据库打开失败时连接未释放的 bug**（`LiteOrm`）：`DAOContextPool.PeekContext(Async)` 打开连接失败时未释放上下文，现改为失败即释放。
 
 ***
 
@@ -461,8 +525,6 @@
 ## v8.0.14 (2026-04-28)
 
 ### 新特性
-
-- 新增 CodeGen 项目 (`c862ffd`)
 
 - 新增 `StringExprConverter` 按实体类型的 `Parse`/`ParsePagedQuery` 方法 (`b4d422f`)
 

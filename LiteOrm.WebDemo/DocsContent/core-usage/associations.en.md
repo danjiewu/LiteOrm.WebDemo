@@ -2,6 +2,8 @@
 
 This page explains how LiteOrm models relationships with `ForeignType`, `TableJoin`, `ForeignColumn`, and `AutoExpand`.
 
+Two terms to settle first: `ForeignType` goes on a single foreign key column, `TableJoin` goes on the class. Both declare a relationship, and the only difference is where you write it. If you cannot decide which one to use, check whether the foreign key is a single column.
+
 ## 1. Core Concepts
 
 - `ForeignType`: property-level relationship metadata, best for a single foreign key column
@@ -237,8 +239,8 @@ Association fields can directly participate in sorting and pagination:
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var expr1 = From<TestUserView>()
-    .Where<TestUserView>(u => u.DeptName != null)
+var expr1 = From(typeof(TestUserView))
+    .Where(Lambda<TestUserView>(u => u.DeptName != null))
     .OrderBy((nameof(TestUserView.DeptName), true))
     .OrderBy((nameof(TestUser.Age), false))
     .Section(0, 3);
@@ -250,8 +252,8 @@ And for deeper parent department fields:
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var expr2 = From<TestUserView>()
-    .Where<TestUserView>(u => u.ParentDeptName == "Parent Dept")
+var expr2 = From(typeof(TestUserView))
+    .Where(Lambda<TestUserView>(u => u.ParentDeptName == "Parent Dept"))
     .OrderBy(nameof(TestUserView.ParentDeptName))
     .OrderBy(nameof(TestUserView.DeptName))
     .OrderBy(nameof(TestUser.Age))
@@ -359,6 +361,18 @@ Usage recommendations:
 
 > `ForeignColumnAttribute.ConverterType` declares this foreign projection column's own column-level converter. When reading, **it prefers its own declared converter and otherwise falls back to the target column's converter** (the target column may itself be another `ForeignColumn`, enabling stepwise fallback). Its usage matches `ColumnAttribute.ConverterType` — provide a type implementing `IDbValueConverter`.
 
+This metadata does not only serve `ExistsRelated`; it also drives the behavior of three related-query entry points:
+
+| Entry point | Location | Where the relation condition lands |
+|------|------|----------------|
+| `ExistsRelated` | WHERE condition | Inside the generated `EXISTS(...)` subquery |
+| `FromRelated<T>` | Lambda query source | Resolves to a `WhereExpr` filtering that table |
+| `JoinRelated<T2>` | Lambda join (`From<T1>().JoinRelated<T2>()`) | Resolves to `TableJoinExpr.On` |
+
+All three share the same inference, implemented as `Expr.BuildRelatedLogic(rootType, rootAlias, foreignType, foreignAlias)`: first look for the target type among the main table's `JoinedTables`, then search the target table's `JoinedTables` in reverse. When no relation is found, `ExistsRelated` and `FromRelated` degrade to a version without a relation condition, while `JoinRelated` throws and asks you to use `Join` with an explicit condition. You can call the method directly when you need to build the relation condition yourself; it returns a `LogicExpr` with both table aliases applied.
+
+When appending a table to an existing join chain, `JoinRelated` picks the inference starting point **from back to front** in association order: it tries the most recently joined table first, falls back one level at a time, and only uses the main table last. So `From<Order>().JoinRelated<User>().JoinRelated<Dept>()` uses the `User` to `Dept` relation instead of requiring `Order` to relate to `Dept` directly.
+
 In implementation, LiteOrm merges ForeignType and TableJoin information during the metadata phase to generate JoinedTable / ForeignTable structures. For fixed-filter metadata and SQL injection details, see [Permission Filtering and User Scope Control](../advanced-topics/permission-filtering.en.md).
 
 ---
@@ -369,6 +383,7 @@ In implementation, LiteOrm merges ForeignType and TableJoin information during t
 - Composite keys, joint primary keys, or joins that need to be reused: use TableJoin to pre-define at the type level, avoiding repeated declarations across multiple views.
 - AutoExpand: only enable for stable, clear, and predictable cascade paths. If the same target table has multiple relationships, prefer explicit modeling and use cautiously.
 - Alias: use Alias/AliasName to avoid column name conflicts, only declare necessary foreign columns in views to reduce network transmission.
+- Do not mix Join and View: a view's `[ForeignColumn]` already handles association JOINs, so do not use a view as the query source or the right table of `Join` / `JoinRelated`; use entity types for explicit multi-table joins and `ExistsRelated` for related-table filtering.
 - Performance verification: review generated SQL for complex views before production and use database execution plans (EXPLAIN) to check indexes and join order.
 
 ---

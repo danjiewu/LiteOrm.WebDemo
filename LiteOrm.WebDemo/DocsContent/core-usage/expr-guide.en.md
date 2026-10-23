@@ -3,6 +3,8 @@
 `Expr` is LiteOrm's core object-expression model, and this article mainly explains how to construct, compose, reuse, and understand its semantics.
 For the choice between Lambda, `Expr`, or `ExprString`, start with the [Query Overview](./query-overview.en.md). For Lambda usage, see the [Lambda Guide](./lambda-guide.en.md); for handwritten SQL in the DAO, see the [ExprString Guide](./exprstring-guide.en.md).
 
+> For everyday fixed conditions, prefer Lambda / `QuerySource<T>`; the `Expr` examples in this article target dynamic composition, cross-layer reuse, and scenarios that need Expr-only capabilities.
+
 ## 1. Creating basic expressions
 
 ### 1.1 Properties, values, and constants
@@ -49,6 +51,31 @@ var currentUserFilter = Sql("CurrentUserFilter");
 - `Func(name, args)`: regular SQL function
 - `Aggregate(name, expr, isDistinct)`: aggregate wrapper
 - `Sql(key, arg)`: registered dynamic SQL fragment for runtime-context filters
+
+`Count`, `Sum`, `Average`, `Max`, and `Min` can be parsed from an IQueryable Lambda into aggregate SQL, or composed directly on `QuerySource<T>`:
+
+```csharp
+// Parse aggregate SQL directly from an IQueryable Lambda
+var total = Expr.Query<Order, int>(q => q.Count());
+var amountSum = Expr.Query<Order, decimal>(q => q.Sum(o => o.Amount));
+var avgAmount = Expr.Query<Order, decimal>(q => q.Average(o => o.Amount));
+
+// Or build the aggregate segment with a structural Select, no lambda needed
+var countExpr = Expr.From(typeof(Order)).Select(Expr.Aggregate("COUNT", Expr.Const(1)));
+var sumExpr = Expr.From(typeof(Order)).Select(Expr.Aggregate("SUM", Expr.Prop("Amount")));
+
+// Scalar subquery; parentheses are added automatically when used in a comparison
+var aboveAverage = Expr.From<Order>()
+    .Where(o => o.Amount > Expr.From<Order>().Average(x => x.Amount))
+    .GetQueryExpr();
+
+// A query source with an executor can compute directly
+var count = new QuerySource<Order>(dao).Where(o => o.Status == 1).Count();
+```
+
+Both `Expr.Query` and `Expr.From<T>()...GetQueryExpr()` are supported: the former fits shapes the lambda resolver must own, such as Join and root-level aggregates; the latter fits query composition across layers.
+
+Without a selector, `Count()` renders `COUNT(1)`; with one, the whole selector expression becomes the aggregate argument, so arithmetic such as `x => x.Amount * x.Rate` works too. Both `Average` and `Avg` map to `AVG`. The resulting `SelectExpr` carries no column alias, so a scalar subquery does not emit a redundant `AS`.
 
 ### 1.4 Type conversion and conditional values
 
@@ -182,12 +209,12 @@ Additional note: in string-based entry points like these, property names and `or
 
 In a Lambda you can embed a dynamic `Expr` with `expr.To<bool>()`. For the full approach and trade-offs, see [Mixing Lambda and Expr](./lambda-expr-mixing.en.md).
 
-## 4. Build chained queries with `Expr.From<T>()`
+## 4. Build chained queries with `Expr.From(type)`
 
 ```csharp
 using static LiteOrm.Common.Expr;
 
-var query = From<User>()
+var query = From(typeof(User))
     .Where(Prop("Age") > 18)
     .GroupBy(Prop("DeptId"))
     .Having(Prop("Id").Count() > 5)
@@ -201,6 +228,12 @@ var query = From<User>()
 
 This is the most complete `Expr` style: start from `FROM`, then build `WHERE / GROUP BY / HAVING / SELECT / ORDER BY / paging`.
 
+`From` has two overloads with different roles:
+
+- `Expr.From(type, tableArgs)` takes a `Type` and returns `TableExpr`. It is the only factory that can be called directly.
+- `Expr.From<T>(tableArgs)` returns `QuerySource<T>`, which implements `IQueryable<T>`. Inside a lambda the resolver takes it over; outside a lambda you can keep composing `Where` / `Select` and finish the chain with `GetQueryExpr()`. Without an executor it cannot fetch data and enumeration throws `InvalidOperationException`.
+- `Expr.FromRelated<T>(tableArgs)` also returns `QuerySource<T>`; the difference is that inside a lambda it adds the automatic relation condition.
+
 ## 5. Expr type map
 
 You can think of LiteOrm's `Expr` model as four layers:
@@ -211,6 +244,14 @@ You can think of LiteOrm's `Expr` model as four layers:
 | Value expressions | `ValueTypeExpr` | Values that can appear in columns, functions, comparisons, and `SELECT` items |
 | Logical expressions | `LogicExpr` | Boolean expressions that can appear in `WHERE`, `HAVING`, or `EXISTS` |
 | SQL segments | `SqlSegment` | Chainable SQL nodes such as `FROM / SELECT / WHERE / ORDER BY` |
+
+Getting an expression into SQL takes three stages: `Expr` → `SqlSegment` → `PreparedSql`. No reflection anywhere in that path, and string building uses pooled buffers.
+
+Concretely, `Expr.Prop("Age") > 18` produces a SQL string with a placeholder plus one parameter whose value is 18. The 18 never appears as a literal in the SQL text. That is where injection gets cut off.
+
+The exit point is `ExprSqlConverter`: `Expr.ToSql(SqlBuildContext)` (`ExprSqlConverter.cs:128`) dispatches by expression type and adds parentheses where they are required; `Expr.ToPreparedSql(SqlBuildContext)` (`:306`) packages the SQL text and the parameter list into a `PreparedSql`.
+
+`ValueStringBuilder` is the framework's own string builder: a `ref struct` that rents a buffer from `ArrayPool<char>` and returns it afterwards. `SqlValueStringBuilder` keeps a few of them, one per clause such as SELECT, FROM and WHERE. Most of the GC savings come from here.
 
 ### 5.1 ValueTypeExpr family
 
@@ -267,11 +308,13 @@ In day-to-day query code, the most common ones are usually:
 | `Expr.Value(value)` | Create a parameterized value | `Expr.Value(18)` |
 | `Expr.Const(value)` | Create an inline constant | `Expr.Const("Enabled")` |
 | `Expr.Null` | SQL NULL | `Expr.Null` |
-| `Expr.From<T>()` | Create a chained-query starting point | `Expr.From<User>()` |
+| `Expr.From(type)` | Create a chained-query starting point (callable directly) | `Expr.From(typeof(User))` |
+| `Expr.From<T>()` | Builds a `QuerySource<T>`: a lambda placeholder, or a composable IQueryable chain that cannot fetch data without an executor | `Expr.From<User>()` |
+| `Expr.FromRelated<T>()` | Same as `Expr.From<T>()` but adds the relation condition inside a lambda | `Expr.FromRelated<Department>()` |
 | `Expr.Update<T>()` | Create an UPDATE expression | `Expr.Update<User>()` |
 | `Expr.Delete<T>()` | Create a DELETE expression | `Expr.Delete<User>()` |
-| `Expr.Exists<T>(innerExpr)` | Create an EXISTS subquery | `Expr.Exists<Department>(...)` |
-| `Expr.ExistsRelated<T>(innerExpr)` | Create an auto-related EXISTS subquery | `Expr.ExistsRelated<DepartmentView>(...)` |
+| `Expr.Exists(type, innerExpr)` | Create an EXISTS subquery | `Expr.Exists(typeof(Department), ...)` |
+| `Expr.ExistsRelated(type, innerExpr)` | Create an auto-related EXISTS subquery | `Expr.ExistsRelated(typeof(DepartmentView), ...)` |
 | `Expr.Lambda<T>(expr)` | Convert Lambda into `LogicExpr` | `Expr.Lambda<User>(u => u.Age > 18)` |
 | `Expr.Func(name, args)` | Create a function expression | `Expr.Func("COUNT", Expr.Prop("Id"))` |
 | `Expr.Aggregate(name, expr, isDistinct)` | Create an aggregate expression | `Expr.Aggregate("COUNT", Expr.Prop("Id"), true)` |
@@ -280,8 +323,9 @@ In day-to-day query code, the most common ones are usually:
 | `Expr.Now()` | Current timestamp | `Expr.Now()` |
 | `Expr.Today()` | Current date | `Expr.Today()` |
 | `Expr.Sql(key, arg)` | Dynamic SQL fragment; the result implicitly converts to `ValueTypeExpr` | `Expr.Sql("CurrentUserFilter")` |
-| `Expr.Query<T>(expression)` | Convert IQueryable Lambda to Expr | `Expr.Query<User>(...)` |
-| `Expr.Query<T, TResult>(expression)` | Convert IQueryable Lambda with scalar result to Expr | `Expr.Query<User, int>(...)` |
+| `QuerySource<T>.GetQueryExpr()` | Convert a composed IQueryable chain to `Expr`, no executor needed | `Expr.From<User>().Where(u => u.Age > 18).GetQueryExpr()` |
+| `Expr.Query<T>(expression)` | Converts an IQueryable Lambda to Expr | `Expr.Query<User>(...)` |
+| `Expr.Query<T, TResult>(expression)` | Converts an IQueryable Lambda with a return value to Expr | `Expr.Query<User, int>(...)` |
 
 ## 7. Operator overloads and implicit conversions
 
@@ -416,7 +460,7 @@ LiteOrm also includes a few ergonomic conversions for chained APIs:
 ```csharp
 using static LiteOrm.Common.Expr;
 
-var query = From<User>()
+var query = From(typeof(User))
     .OrderBy(("Age", false)); // (string property, bool ascending) -> OrderByItemExpr
 
 var update = Update<User>()
@@ -479,8 +523,9 @@ Additional note: `Contains` / `StartsWith` / `EndsWith` / `Like` still use param
 await dao.Search(u => Regex.IsMatch(u.Name!, @"\d+"));
 
 // SELECT REGEXP_REPLACE(Name, '\d+', '#')
-await dao.Search(Expr.Query<TestUser, IQueryable<object>>(q => q
-    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })));
+await dao.Search(Expr.From<TestUser>()
+    .Select(u => new { Replaced = Regex.Replace(u.Name!, @"\d+", "#") })
+    .GetQueryExpr());
 
 // SELECT REGEXP_SUBSTR(Name, '\d+')  -- extract first match
 // SELECT REGEXP_INSTR(Name, '\d+') - 1  -- match position (0-based)
@@ -511,6 +556,15 @@ Supports static form `Regex.IsMatch(...)`, instance form `new Regex(pattern).IsM
 | `.OrderBy(props)` | ORDER BY |
 | `.Section(skip, take)` | paging |
 | `.Set(assignments)` | UPDATE SET |
+
+> Repeating a clause keeps editing the same expression instead of nesting a new one:
+> - `.Where(a).Where(b)` → the same `WhereExpr`, conditions combined with AND
+> - `.GroupBy(a).GroupBy(b)` → the same `GroupByExpr`, group fields appended
+> - `.Having(a).Having(b)` → the same `HavingExpr`, conditions combined with AND
+> - `.OrderBy(a).OrderBy(b)` → the same `OrderByExpr`, ordering items appended
+> - `.Section(0, 10).Section(5, 20)` → the same `SectionExpr`, `Skip` / `Take` updated in place
+>
+> `.Select(...)` is the exception: it marks a projection boundary, so repeating it creates a subquery; use `.SelectMore(...)` to append select items.
 
 ## 9. Equals and composition semantics
 

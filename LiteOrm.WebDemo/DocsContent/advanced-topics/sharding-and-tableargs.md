@@ -144,7 +144,7 @@ UserShard_1.Orders
 
 1. 同一个连接已经可以访问多个库 / Schema。
 2. 各分片中的表结构相同，只是库名 / Schema 名不同。
-3. 你希望继续沿用 `IArged`、`tableArgs`、`WithArgs(...)`、`Expr.From<T>(...)` 这一整套动态路由方式。
+3. 你希望继续沿用 `IArged`、`tableArgs`、`WithArgs(...)`、`Expr.From(typeof(T), ...)` 这一整套动态路由方式。
 
 > **注意**：`{0}.Orders` 依赖目标数据库支持当前连接跨库 / Schema 访问。<br/>
 > 如果不同分片必须使用完全不同的连接字符串，应优先使用后文的 `DataSource` 方案，而不是把库名直接写进 `TableArgs`。
@@ -208,11 +208,11 @@ var results = await salesViewDAO
 
 `TableArgs` 不只是“当前这一张表”的参数，还具有作用域传递性：
 
-1. 主表一旦指定了 `tableArgs`、`WithArgs(...)`、`Expr.From<T>(...)` 的参数，这组参数会进入当前 SQL 作用域。
+1. 主表一旦指定了 `tableArgs`、`WithArgs(...)`、`Expr.From(typeof(T), ...)` 的参数，这组参数会进入当前 SQL 作用域。
 2. 同作用域中的后续表，以及下级作用域中的子查询 / 关联查询，如果自己没有再显式指定 `TableArgs`，会继续使用主表传递下来的参数。
 3. 如果后续表在自己的 `TableExpr` 或关联表达式上再次显式指定了 `TableArgs`，则以显式值覆盖继承值。
 
-这意味着在“同一套分表维度贯穿整条查询链”的场景下，通常只需要在主表指定一次参数，后续表无需重复传参。
+在“同一套分表维度贯穿整条查询链”的场景下，通常只需要在主表指定一次参数，后续表无需重复传参。
 
 > **安全提示**：`TableExpr` 上显式指定的 `TableArgs` 会覆盖当前 `SqlBuildContext` 里继承下来的分表参数。<br/>
 > 如果你的上层上下文本来依赖这组参数来限制租户、分片或数据范围，那么下层 `TableExpr` 的显式覆盖可能绕开原有边界，使用时要特别注意避免数据越界访问。
@@ -265,6 +265,10 @@ var sales = await salesService.SearchAsync(s =>
 
 适合“查询固定月份或固定分片”的快速写法。
 
+> 该写法同样适用于 `QuerySource`：`Expr.From<SalesRecord>().Where(s => s.TableArgs == new[] { "202412" })` 会把分表参数回填到查询根表。
+
+Join 场景可以按元组元素指定到具体表：`From<Order>().JoinRelated<Customer>().Where(x => ((IArged)x.Item1).TableArgs == new[] { "202412" } && ((IArged)x.Item2).TableArgs == new[] { "202401" })`。
+
 ### 6.2 显式传入 `tableArgs`
 
 ```csharp
@@ -276,12 +280,12 @@ var sales = await salesService.SearchAsync(
 
 适合把分表参数放在调用层统一控制。
 
-### 6.3 使用 `Expr.From<T>(...)` 指定分表
+### 6.3 使用 `Expr.From(typeof(T), ...)` 指定分表
 
 ```csharp
 using static LiteOrm.Common.Expr;
 var sales = await salesService.SearchAsync(
-    From<SalesRecordView>("202411")
+    From(typeof(SalesRecordView), "202411")
         .Where(Prop("Amount") > 100)
         .OrderBy(("Amount", false))
         .Section(0, 3)
@@ -295,7 +299,7 @@ var sales = await salesService.SearchAsync(
 ```csharp
 using static LiteOrm.Common.Expr;
 var sales = await salesService.SearchAsync(
-    From<SalesRecord>("US", "2025")
+    From(typeof(SalesRecord), "US", "2025")
         .Where(Prop("Amount") > 100)
         .Section(0, 20)
 );
@@ -327,7 +331,7 @@ public class Table2Row
 using static LiteOrm.Common.Expr;
 var args = new[] { "TenantA", "202501" };
 
-var expr = From<Table1Row>(args)
+var expr = From(typeof(Table1Row), args)
     // 同作用域或下级作用域里的 Table2Row 如果没有单独指定 TableArgs
     // 会继续使用这组 args
     .Where(Exists<Table2Row>(t => true));

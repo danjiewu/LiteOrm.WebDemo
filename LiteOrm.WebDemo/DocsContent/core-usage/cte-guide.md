@@ -50,7 +50,7 @@ CTE 很适合先聚合、再过滤：
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var cteDef = From<User>()
+var cteDef = From(typeof(User))
     .Where(Prop("Age") >= 25)
     .GroupBy(Prop("DeptId"))
     .Select(
@@ -71,7 +71,7 @@ var query = cteDef.With("DeptAdultStats")
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var adultUsers = From<User>()
+var adultUsers = From(typeof(User))
     .Where(Prop("Age") >= 18)
     .Select(
         Prop("UserName").As("Name"),
@@ -101,7 +101,7 @@ LiteOrm 现在会先收集整棵表达式树里的 CTE，再按别名做校验�
 - 同别名但定义**不相等**：抛出 `InvalidOperationException`
 - 只引用别名、但前面没有先出现完整定义：抛出异常
 
-这意味着你可以在复杂查询里复用同一个 CTE 表达式；或者使用同一个 CTE 别名，但必须保证其定义一致。
+于是你可以在复杂查询里复用同一个 CTE 表达式；也可以使用同一个 CTE 别名，但必须保证其定义一致。
 
 ### 5.1 递归 CTE
 
@@ -115,7 +115,7 @@ LiteOrm 现在会先收集整棵表达式树里的 CTE，再按别名做校验�
 using static LiteOrm.Common.Expr;
 
 // 锚点部分：查询根节点
-var anchor = From<Category>()
+var anchor = From(typeof(Category))
     .Where(Prop("ParentId") == 0)
     .Select(
         Prop("Id").As("Id"),
@@ -125,7 +125,7 @@ var anchor = From<Category>()
 
 // 递归部分：通过自引用别名关联子节点
 var selfRef = new CommonTableExpr { Alias = "CategoryTree" };
-var recursive = From<Category>()
+var recursive = Expr.From(typeof(Category))
     .Join(selfRef, Prop("ParentId") == Prop("CategoryTree", "Id"))
     .Select(
         Prop("Id").As("Id"),

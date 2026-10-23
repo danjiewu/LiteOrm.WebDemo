@@ -50,7 +50,7 @@ CTE is a good fit for "aggregate first, filter later":
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var cteDef = From<User>()
+var cteDef = From(typeof(User))
     .Where(Prop("Age") >= 25)
     .GroupBy(Prop("DeptId"))
     .Select(
@@ -71,7 +71,7 @@ CTE can also be reused on both sides of a `UNION` / `UNION ALL` query:
 
 ```csharp
 using static LiteOrm.Common.Expr;
-var adultUsers = From<User>()
+var adultUsers = From(typeof(User))
     .Where(Prop("Age") >= 18)
     .Select(
         Prop("UserName").As("Name"),
@@ -107,7 +107,7 @@ So you can safely reuse the same CTE expression multiple times, or reuse the sam
 
 Recursive CTEs are used for hierarchical / tree-structured data (org charts, category trees, path finding, etc.). LiteOrm decides whether to emit the `RECURSIVE` keyword based on the database's `ExplicitRecursive` property.
 
-### Writing a recursive CTE
+#### Writing a recursive CTE
 
 To write a recursive CTE, reference the CTE's own alias within its definition. Create an alias-only `CommonTableExpr` for the self-reference:
 
@@ -115,7 +115,7 @@ To write a recursive CTE, reference the CTE's own alias within its definition. C
 using static LiteOrm.Common.Expr;
 
 // Anchor part: query root nodes
-var anchor = From<Category>()
+var anchor = From(typeof(Category))
     .Where(Prop("ParentId") == 0)
     .Select(
         Prop("Id").As("Id"),
@@ -125,7 +125,7 @@ var anchor = From<Category>()
 
 // Recursive part: join children via self-referencing alias
 var selfRef = new CommonTableExpr { Alias = "CategoryTree" };
-var recursive = From<Category>()
+var recursive = Expr.From(typeof(Category))
     .Join(selfRef, Prop("ParentId") == Prop("CategoryTree", "Id"))
     .Select(
         Prop("Id").As("Id"),
@@ -139,7 +139,7 @@ var query = cteDef.With("CategoryTree")
     .Select(Prop("Id"), Prop("Name"), Prop("Level"));
 ```
 
-### SQL generation behaviour
+#### SQL generation behaviour
 
 Whether the `RECURSIVE` keyword is appended after `WITH` depends solely on the target database's `SqlBuilder.ExplicitRecursive` property:
 
