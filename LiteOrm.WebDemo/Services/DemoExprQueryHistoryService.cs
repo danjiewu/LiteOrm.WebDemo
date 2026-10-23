@@ -41,7 +41,7 @@ public class DemoExprQueryHistoryService(IServiceProvider serviceProvider) : Ent
 
     public async Task<IReadOnlyList<ExprQueryHistoryDto>> ListAsync(AuthSessionUser currentUser, int take = 20, CancellationToken cancellationToken = default)
     {
-        var query = Expr.From<DemoExprQueryHistory>()
+        var query = Expr.From(typeof(DemoExprQueryHistory))
             .Where(Expr.Prop(nameof(DemoExprQueryHistory.UserId)) == currentUser.Id)
             .OrderBy(Expr.Prop(nameof(DemoExprQueryHistory.CreatedTime)).Desc())
             .Section(0, NormalizeTake(take));

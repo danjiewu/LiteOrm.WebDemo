@@ -32,7 +32,7 @@ public class DemoOrderService(IServiceProvider serviceProvider, IMemoryCache _me
         SqlTraceHelper.Reset();
 
         var total = await CountCachedAsync(filter, cancellationToken);
-        var query = ApplyNativeOrderBy(Expr.From<DemoOrderView>().Where(filter), parts.OrderBys).Section(skip, take);
+        var query = ApplyNativeOrderBy(Expr.From(typeof(DemoOrderView)).Where(filter), parts.OrderBys).Section(skip, take);
         var items = await SearchAsync(query, cancellationToken: cancellationToken);
 
         return new OrderExprQueryResponse(

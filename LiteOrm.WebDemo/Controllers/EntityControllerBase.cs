@@ -77,7 +77,7 @@ public abstract class EntityControllerBase<T, TView> : ControllerBase
 
         var skip = (page - 1) * rows;
 
-        ISourceAnchor queryExpr = Expr.From<TView>();
+        ISourceAnchor queryExpr = Expr.From(typeof(TView));
         if (filter != null)
             queryExpr = queryExpr.Where(filter);
 
@@ -147,11 +147,11 @@ public abstract class EntityControllerBase<T, TView> : ControllerBase
         }
         else if (expr is LogicExpr logicExpr)
         {
-            expr = Expr.From<TView>().Where(logicExpr).Section(0, take);
+            expr = Expr.From(typeof(TView)).Where(logicExpr).Section(0, take);
         }
         else
         {
-            expr = Expr.From<TView>().Section(0, take);
+            expr = Expr.From(typeof(TView)).Section(0, take);
         }
 
         var countExpr = ExtractFilter(expr);
@@ -167,7 +167,7 @@ public abstract class EntityControllerBase<T, TView> : ControllerBase
     {
         var source = section.Source;
         var rebuilt = (source as ISectionAnchor)?.Section(skip, take)
-            ?? Expr.From<TView>().Section(skip, take);
+            ?? Expr.From(typeof(TView)).Section(skip, take);
         return (rebuilt as SectionExpr)!;
     }
 
