@@ -50,6 +50,24 @@ This page groups current LiteOrm examples by scenario instead of by chapter. Mos
   - `Like`
   - converting a dynamic DTO into `Expr`
 
+### Complex queries: department trees, last 7 days, dynamic sorting/paging and saved conditions
+
+- Entry doc: [Complex Query Examples](../typical-applications/complex-queries.en.md)
+- Code sources:
+  - `LiteOrm.Tests\Converter\LambdaExprConverterTests.cs`
+  - `LiteOrm.Tests\Expr\GenericSqlExprTests.cs`
+  - `LiteOrm.Tests\SqlBuilder\RecursiveCteSqlTests.cs`
+  - `LiteOrm.Tests\Expr\RawSqlExprStringTests.cs`
+  - `LiteOrm.Tests\SqlBuilder\SqlGenTests.cs`
+- Focus:
+  - filtering by a department and all its descendants: `GenericSqlExpr` + `AsValue()` and a custom `FunctionExpr`
+  - dialect tree SQL emitting `CONNECT BY` or a recursive CTE
+  - the last 7 days: whether `DateTime.Now` becomes a function or a parameter
+  - header-click sorting: a whitelist plus `Expr`-built `OrderByItemExpr`
+  - one `LogicExpr` filter driving both `count` and the current page
+  - persisting `Expr` as JSON, reloading it, then layering more conditions
+  - mixing Lambda, `Expr` and `ExprString`, and debugging generated SQL with `SqlGen`
+
 ## 3. Write and batch examples
 
 ### Batch insert, update, and delete

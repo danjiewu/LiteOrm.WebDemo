@@ -78,7 +78,8 @@ This is the main index of the LiteOrm documentation set. For deeper coverage, fo
 |[JSON Columns for Objects and Field-Level Queries](./typical-applications/json-column-mapping.md)|Whole-object JSON columns, converter registration, field-to-JSON-function mapping and field-level queries|
 |[Computed Columns in Practice](./typical-applications/computed-columns.md)|Three worked examples — tier discounts, listing status bits, cross-table display names — with generated SQL|
 |[Concurrency and Read/Write Splitting](./typical-applications/concurrency-and-read-write-splitting.md)|Timestamp optimistic concurrency, transaction boundaries, read-only replicas and consistency|
-|[Projection on Demand: Entity-First or Query-Time](./typical-applications/query-projection.md)|Four requirements comparing entity-first projection with query-time projection: list pages, exports, detail pages and grouped aggregation|
+|[Projection on Demand](./typical-applications/query-projection.md)|Four requirements comparing entity-first projection with query-time projection: list pages, exports, detail pages and grouped aggregation|
+|[Complex Query Examples](./typical-applications/complex-queries.md)|One query JSON including sorting and paging handed directly to `Search`, extracting the filter for counting, orders for a department and its descendants, last 7 days as function vs. parameter, tree SQL via `GenericSqlExpr` and a custom `FunctionExpr`, count and page from one filter, saved/reloaded condition JSON, an equivalent Lambda entry that builds a Query object and passes it in, and SqlGen debugging|
 
 ### Reference
 
@@ -111,5 +112,5 @@ This is the main index of the LiteOrm documentation set. For deeper coverage, fo
 4. Integrating via `LiteOrm.DependencyInjection` (Autofac, AOP): read the [Config Reference](./reference/configuration-reference.md) first, then the transactions, logging and service authorization topics in DI Extension.
 5. Sharding, performance or dialect differences: continue with Advanced Topics.
 6. Extending the framework itself: see Extensibility.
-7. Landing a concrete business scenario (tenant isolation, data permissions, soft delete and archiving, auditing, sensitive field encryption, JSON columns for objects, concurrency and read/write splitting, projection on demand): see Use Cases — every topic ships a requirement description plus copy-paste-ready code.
+7. Landing a concrete business scenario (tenant isolation, data permissions, soft delete and archiving, auditing, sensitive field encryption, JSON columns for objects, concurrency and read/write splitting, projection on demand, complex queries with department trees, last-7-days filtering, dynamic sorting/paging and saved conditions): see Use Cases — every topic ships a requirement description plus copy-paste-ready code.
 8. Need to confirm a configuration key, an interface name or a term: go straight to Reference.

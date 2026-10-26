@@ -50,6 +50,24 @@
   - `Like`
   - 动态 DTO 转 `Expr`
 
+### 复杂查询：部门树、最近 7 天、动态排序分页与条件持久化
+
+- 文档入口：[复杂查询实例](../typical-applications/complex-queries.md)
+- 代码来源：
+  - `LiteOrm.Tests\Converter\LambdaExprConverterTests.cs`
+  - `LiteOrm.Tests\Expr\GenericSqlExprTests.cs`
+  - `LiteOrm.Tests\SqlBuilder\RecursiveCteSqlTests.cs`
+  - `LiteOrm.Tests\Expr\RawSqlExprStringTests.cs`
+  - `LiteOrm.Tests\SqlBuilder\SqlGenTests.cs`
+- 重点内容：
+  - 部门及所有下级部门过滤：`GenericSqlExpr` + `AsValue()` 与自定义 `FunctionExpr` 两种实现
+  - 树形 SQL 按方言输出 `CONNECT BY` 或递归 CTE
+  - 最近 7 天：`DateTime.Now` 解析为函数还是参数
+  - 表头点击驱动排序：白名单 + `Expr` 拼装 `OrderByItemExpr`
+  - 同一 `LogicExpr` 条件取 `count` 与当页数据
+  - `Expr` 保存为 JSON 并重新加载，之后继续叠加条件
+  - Lambda / `Expr` / `ExprString` 混用，以及 `SqlGen` 调试生成的 SQL
+
 ## 3. 写入与批处理示例
 
 ### 批量插入、批量更新、批量删除
