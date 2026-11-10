@@ -567,6 +567,8 @@ public interface IUserService
 7. **生产必做认证**——远程端点暴露后破坏力巨大，必须接入 ASP.NET Core 认证授权中间件保护。
 8. **同名方法用 `[ServiceMethod]` 区分**——C# 重载在远程场景下默认无法区分，用 `[ServiceMethod(MethodName = "...")]` 指定不同的服务方法名即可共存。
 
-下一篇暂无。
-
 > **完整演示代码**：[RemoteServiceDemo.cs](https://github.com/danjiewu/LiteOrm/tree/master/LiteOrm.Demo/Demos/RemoteServiceDemo.cs)
+
+## 下一篇预告
+
+[第14篇：复杂查询实例](./14-complex-queries.md) — 用一份查询 JSON 或 Lambda Query 对象完成部门树、最近 7 天、动态排序分页与条件持久化。

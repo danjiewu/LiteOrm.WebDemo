@@ -4,6 +4,10 @@
 
 LiteOrm's structured expression model for SQL-shaped queries, updates, functions, and segments.
 
+## `QuerySource<T>`
+
+A composable query source implementing `IQueryable<T>` / `IOrderedQueryable<T>`, created by `Expr.From<T>()`; an instance resolved from the container is bound to `IQuerySourceExecutor<T>` and can run async queries such as `ToListAsync` / `CountAsync` directly. After `Where` / `Select`, use `AsSource()` to narrow back to `QuerySource<T>`. Located in the `LiteOrm.Common` namespace.
+
 ## `LogicExpr`
 
 The condition-oriented part of the expression system, used for comparisons, boolean composition, `IN`, `EXISTS`, and similar predicates.
@@ -60,6 +64,10 @@ The dialect builder that converts LiteOrm expressions into executable SQL for a 
 
 The `Constant` property of `ColumnAttribute`, used to declare fixed filter conditions. Resolved at metadata stage into `TableDefinition.ConstFilter`, and automatically injected during SQL generation into main-table `WHERE`, the `JOIN ... ON` of association queries, and the DAO key-based statements (`GetObject`, `ExistsKey`, `Update`, `DeleteByKeys`, batch update and delete). A joined table's condition only reaches association statements produced by expression queries; the model's own `From` fragment used by `GetObject` / `ExistsKey` does not carry it. Suited for model-level invariant rules such as enabled-state, fixed partitions, or fixed tenant types; not suited for runtime context like the current user or tenant. See [Permission Filtering](../advanced-topics/permission-filtering.en.md).
 
+## `CommonTableExpr`
+
+A common table expression (CTE) node, usually created by `SelectExpr.With(name)`. While rendering it hands itself to `SqlBuildContext.AddCommonTableExpr` for collection, and after the main query is rendered LiteOrm emits the `WITH` / `WITH RECURSIVE` clause; equal definitions under the same alias are deduplicated, while differing definitions throw. Located in the `LiteOrm.Common` namespace.
+
 ## `GenericSqlExpr`
 
 A delegate-based dynamic SQL expression (`sealed class GenericSqlExpr : LogicExpr`) that lets you inject custom SQL generation logic without building a full Expr tree. Register a callback delegate via `GenericSqlExpr.Register` and reference it with `Expr.Sql(key, arg)`. It implements an implicit conversion to `ValueTypeExpr`, so once wrapped as a value expression it can be used directly in value positions such as SELECT columns, function arguments, and computed columns; when it takes part in operators or extension method chains, call `AsValue()` explicitly. Located in the `LiteOrm.Common` namespace.
@@ -86,4 +94,4 @@ An Expr cycle-reference detector (`static class`) exposing `HasCycle` / `FindCyc
 
 ## `SqlBuildContext`
 
-The SQL build context, carrying table aliases, scopes, table-name arguments and other state during SQL generation for use by `ISqlBuilder` and the Expr-to-SQL pipeline. DAOs can customize the context by overriding `CreateSqlBuildContext` (e.g. to inject sharding arguments). Located in the `LiteOrm.Common` namespace.
+The SQL build context, carrying table aliases, scopes, table-name arguments, and the CTEs collected during rendering (`CommonTableExprs`) for use by `ISqlBuilder` and the Expr-to-SQL pipeline. DAOs can customize the context by overriding `CreateSqlBuildContext` (e.g. to inject sharding arguments); a root-level call `ToSql(context, true)` (or `ToPreparedSql`) calls `Init()` automatically to reset the scope, alias sequence and collected CTEs (`OutputParams` stays under the caller's control). Located in the `LiteOrm.Common` namespace.

@@ -95,13 +95,19 @@ var query = adultUsers
 
 ## 5. 同别名 CTE 的校验规则
 
-LiteOrm 现在会先收集整棵表达式树里的 CTE，再按别名做校验：
+CTE 定义不再提前遍历整棵表达式树收集，而是在渲染时边渲染边收集：`CommonTableExpr` 走到渲染方法时把自身交给 `SqlBuildContext.AddCommonTableExpr`，该方法先用后序遍历一次性收集定义主体中引用的 CTE（依赖在先），再收集自身，当前位置只输出别名；主查询渲染完成后，再用收集到的定义按顺序拼出 `WITH` 子句放到 SQL 最前面。
+
+收集时按别名做校验：
 
 - 同别名且定义**相等**：自动去重，只保留第一份定义写入 `WITH`
 - 同别名但定义**不相等**：抛出 `InvalidOperationException`
-- 只引用别名、但前面没有先出现完整定义：抛出异常
+- 只引用别名、但整棵树里没有对应完整定义：抛出异常
 
 于是你可以在复杂查询里复用同一个 CTE 表达式；也可以使用同一个 CTE 别名，但必须保证其定义一致。
+
+> 顶层调用 `expr.ToSql(context, true)`（`isRoot` 为 `true`）或 `expr.ToPreparedSql(context)` 会自动调用 `context.Init()` 重置作用域、别名序列与已收集的 CTE，因此复用同一个上下文重新生成 SQL 时不必手动清理；`OutputParams` 由调用方管理，`Init()` 不会清空它。渲染过程中的嵌套调用（如函数处理器内）保持 `isRoot` 默认值 `false`，不会重置上下文，其收集到的 CTE 会由最外层统一输出。
+
+> CTE 定义在主体渲染完成后才统一渲染并拼到最前面，因此 CTE 内产生的参数在占位符编号上排在主体条件之后；`BuildCteSql` 会把这些参数前移到 `OutputParams` 开头，使参数集合顺序与最终 SQL 文本一致。参数按名称绑定，编号先后不影响执行。
 
 ### 5.1 递归 CTE
 
@@ -153,8 +159,8 @@ var query = cteDef.With("CategoryTree")
 | MySQL / TiDB / OceanBase / GreatDB | `true` | 使用 `WITH RECURSIVE` |
 | PostgreSQL / KingbaseES / GaussDB | `true` | 使用 `WITH RECURSIVE` |
 | SQLite | `true` | 使用 `WITH RECURSIVE` |
-| SQL Server | `false` | 不需要 `RECURSIVE` 关键字 |
-| Oracle / 达梦（DM） | `false` | 不需要 `RECURSIVE` 关键字 |
+| SQL Server | `false` | 不需要 `RECURSIVE` 关键字，仍支持递归 CTE |
+| Oracle / 达梦（DM） | `false` | 不支持递归 CTE，树形查询改用 `CONNECT BY` |
 
 对于 `ExplicitRecursive` 为 `true` 的数据库，生成 SQL 形如：
 
@@ -170,7 +176,7 @@ SELECT [Id], [Name], [Level]
 FROM [CategoryTree]
 ```
 
-对于 `ExplicitRecursive` 为 `false` 的数据库（如 SQL Server），只生成 `WITH`（不带 `RECURSIVE`）。
+对于 `ExplicitRecursive` 为 `false` 的数据库，只生成 `WITH`（不带 `RECURSIVE`）。其中 SQL Server 仍支持递归 CTE；Oracle / 达梦不支持递归 CTE 的自引用，层级查询应改用 `CONNECT BY`（参见[复杂查询实例](../typical-applications/complex-queries.md#3-部门树过滤)）。
 
 ## 6. CTE 序列化规则
 

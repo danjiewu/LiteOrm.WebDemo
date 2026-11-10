@@ -245,7 +245,7 @@ var query = From(typeof(User))
 
 举个具体的。你写 `Expr.Prop("Age") > 18`，拿到手的是一条带占位符的 SQL，外加一个值为 18 的参数，18 不会以字面量形式出现在 SQL 文本里。注入就是从这一步被掐掉的。
 
-出口是 `ExprSqlConverter`：`Expr.ToSql(SqlBuildContext)`（`ExprSqlConverter.cs:128`）按表达式类型分发，该补括号的地方补上；`Expr.ToPreparedSql(SqlBuildContext)`（`:306`）把 SQL 文本和参数列表打包成 `PreparedSql`。
+出口是 `ExprSqlConverter`：`Expr.ToSql(SqlBuildContext, bool isRoot = false)`（`ExprSqlConverter.cs:126`）按表达式类型分发，该补括号的地方补上；`Expr.ToPreparedSql(SqlBuildContext)`（`:279`）把 SQL 文本和参数列表打包成 `PreparedSql`。
 
 `ValueStringBuilder` 是框架自己写的字符串构建器，`ref struct`，从 `ArrayPool<char>` 租缓冲，用完还回去。`SqlValueStringBuilder` 按 SELECT、FROM、WHERE 这些子句各持有几个。省 GC 主要靠这里。
 
@@ -536,7 +536,7 @@ await dao.Search(Expr.From<TestUser>()
 |------|------|
 | `.As(name)` | 生成 `SelectItemExpr` |
 | `.Distinct()` | DISTINCT |
-| `.Count()` `.Sum()` `.Avg()` `.Max()` `.Min()` | 聚合 |
+| `.Count()` `.Sum()` `.Avg()` `.Max()` `.Min()` `.ListAgg(separator, orderBy)` | 聚合 |
 | `.Asc()` `.Desc()` | 排序 |
 | `.Over(partitionBy)` | 窗口函数 |
 

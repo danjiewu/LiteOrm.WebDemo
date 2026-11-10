@@ -4,6 +4,10 @@
 
 LiteOrm 的表达式对象模型，用来描述 SQL 结构，可用于动态拼接查询、更新和函数调用。
 
+## `QuerySource<T>`
+
+可组合的查询源，实现 `IQueryable<T>` / `IOrderedQueryable<T>`，由 `Expr.From<T>()` 创建；从容器解析的实例绑定 `IQuerySourceExecutor<T>`，可直接执行 `ToListAsync` / `CountAsync` 等异步查询。`Where` / `Select` 后可用 `AsSource()` 收窄回 `QuerySource<T>`。位于 `LiteOrm.Common` 命名空间。
+
 ## `LogicExpr`
 
 用于表达逻辑条件的表达式，如比较、与或非、`IN`、`EXISTS` 等。
@@ -60,6 +64,10 @@ LiteOrm 的表达式对象模型，用来描述 SQL 结构，可用于动态拼�
 
 `ColumnAttribute` 的 `Constant` 属性，用于声明固定筛选条件。在元数据阶段被解析并收敛为 `TableDefinition.ConstFilter`，生成 SQL 时自动注入主表 `WHERE`、关联查询的 `JOIN ... ON`，以及 DAO 走主键的读写语句（`GetObject`、`ExistsKey`、`Update`、`DeleteByKeys`、批量更新与删除）。关联表的条件只进表达式查询生成的关联语句，`GetObject` / `ExistsKey` 用的模型自带 `From` 片段不带它。适合启用态、固定分区、固定租户类型等模型级恒定规则，不适合当前用户或当前租户等运行时上下文。详见[权限过滤](../advanced-topics/permission-filtering.md)。
 
+## `CommonTableExpr`
+
+公共表表达式（CTE）节点，通常由 `SelectExpr.With(name)` 创建。渲染时把自身交给 `SqlBuildContext.AddCommonTableExpr` 收集，主查询渲染完成后统一拼出 `WITH` / `WITH RECURSIVE`；同别名定义相等时去重，不同时抛出异常。位于 `LiteOrm.Common` 命名空间。
+
 ## `GenericSqlExpr`
 
 基于委托的动态 SQL 表达式（`sealed class GenericSqlExpr : LogicExpr`），允许在不构建完整 Expr 树的情况下注入自定义 SQL 生成逻辑。通过 `GenericSqlExpr.Register` 注册回调委托，使用时以 `Expr.Sql(key, arg)` 引用。它实现了到 `ValueTypeExpr` 的隐式转换，包装成值表达式后可直接用于 SELECT 列、函数参数、计算列等值位置；参与运算符或扩展方法链时仍需显式调用 `AsValue()`。位于 `LiteOrm.Common` 命名空间。
@@ -86,5 +94,5 @@ Expr 循环引用检测器（`static class`），提供 `HasCycle` / `FindCycle`
 
 ## `SqlBuildContext`
 
-SQL 构建上下文，携带构建过程中的表别名、作用域、表名参数等状态信息，供 `ISqlBuilder` 和 Expr 转 SQL 流程使用。DAO 可通过重写 `CreateSqlBuildContext` 自定义上下文（如注入分表参数）。位于 `LiteOrm.Common` 命名空间。
+SQL 构建上下文，携带构建过程中的表别名、作用域、表名参数、渲染时收集到的 CTE（`CommonTableExprs`）等状态信息，供 `ISqlBuilder` 和 Expr 转 SQL 流程使用。DAO 可通过重写 `CreateSqlBuildContext` 自定义上下文（如注入分表参数）；根节点调用 `ToSql(context, true)`（或 `ToPreparedSql`）会自动调用 `Init()` 重置作用域、别名序列与已收集的 CTE（`OutputParams` 由调用方管理）。位于 `LiteOrm.Common` 命名空间。
 

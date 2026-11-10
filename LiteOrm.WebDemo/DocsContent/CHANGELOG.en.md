@@ -1,5 +1,33 @@
 # Changelog
 
+## v8.1.15 (2026-11-10)
+
+### New Features
+
+- **`LISTAGG` aggregate function support** (`LiteOrm.Common` / `LiteOrm`): the new `ExprExtensions.ListAgg` extension renders `LISTAGG` / `GROUP_CONCAT` / `STRING_AGG` / `group_concat` per dialect, with `WITHIN GROUP` ordering and `OVER` windows.
+
+### Breaking changes
+
+- **An unresolvable `$type` no longer degrades silently to an empty entity** (`LiteOrm.Common` / `LiteOrm.Remote`): `RemoteInvocationRequestConverter.DeserializeTypedValue` now throws `JsonException` when `$type` cannot be resolved or `$value` is missing; client results and write-back parameters share this implementation.
+
+***
+
+## v8.1.14 (2026-10-28)
+
+### New Features
+
+- **`SqlBuildContext` gains CTE collection and `Init()`** (`LiteOrm.Common`): the context exposes a new `CommonTableExprs` list that receives every `CommonTableExpr` encountered while rendering, plus `Init()`, which resets the scope, alias sequence and collected CTEs while keeping the constructor's table/alias, `TableArgs`, `SingleTable` and `OutputParams`.
+
+### Improvements
+
+- **CTEs are collected while rendering** (`LiteOrm.Common`): the pre-render walk over the whole expression tree is removed; the `CommonTableExpr` rendering path now calls `SqlBuildContext.AddCommonTableExpr`. That method walks the definition body once in post-order, collecting referenced CTEs (dependencies first) before itself, deduplicates by alias, throws on differing definitions, and moves alias-only nodes to the end once a full definition arrives. After the main query is rendered, the `WITH` / `WITH RECURSIVE` clause is emitted once at the front of the statement.
+
+- **`Expr.ToSql(...)` takes an `isRoot` parameter** (`LiteOrm.Common`): `ToSql(this Expr expr, SqlBuildContext context, bool isRoot = false)` calls `Init()` and emits the `WITH` clause only when `isRoot` is `true`; nested rendering such as function handlers and `GenericSqlExpr` callbacks keeps the default `false`, leaves the context untouched, and the CTEs they collect are emitted by the outermost call. `ToPreparedSql` always renders as a root.
+
+- **`WITH` parameters follow SQL text order** (`LiteOrm.Common`): `BuildCteSql` moves the parameters produced while rendering CTE definitions to the front of `OutputParams` so the collection matches the SQL text. CTE parameter numbering differs from 8.1.13 (body conditions first, CTEs after); parameters bind by name, so execution is unaffected.
+
+***
+
 ## v8.1.13 (2026-10-22)
 
 ### Breaking changes
@@ -208,9 +236,7 @@
 
 ### Breaking Changes
 
-```
-- Properties of complex types (arrays/collections, custom classes) are **no longer auto-mapped as table columns**; they require an explicit `[Column]` (and, as appropriate, `DbType = Array`).Known scalars (numerics, `string`/`char`, `byte[]`, `Guid`, dates, enums) and `Json`/`Jsonb` mapped types are still auto-mapped.
-```
+- Properties of complex types (arrays/collections, custom classes) are **no longer auto-mapped as table columns**; they require an explicit `[Column]` (and, as appropriate, `DbType = Array`). Known scalars (numerics, `string`/`char`, `byte[]`, `Guid`, dates, enums) and `Json`/`Jsonb` mapped types are still auto-mapped.
 
 - `EntityService<T>` / `EntityService<T, TView>` / `EntityViewService<T>` constructors now take an `IServiceProvider`, resolving the required `ObjectDAO<T>` / `ObjectViewDAO<T>` from the container; derived service constructors were updated accordingly. No changes are needed under DI.
 

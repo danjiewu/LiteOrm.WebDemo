@@ -132,6 +132,7 @@ Related guides:
 - `SessionManager`
 - `IArged` / `TableArgs`
 - window function extensions
+- LISTAGG aggregate extension (`ExprExtensions.ListAgg`)
 - `Expr.ExistsRelated(...)`
 
 Related guides:
@@ -217,7 +218,7 @@ Use this table when you need to change framework code or confirm where a behavio
 
 ## Related links
 
-- [Back to docs hub](../README.md)
+- [Back to docs hub](../README.en.md)
 - [Example Index](./example-index.en.md)
 - [Generated SQL Examples](./sql-examples.en.md)
 - [Database Compatibility Notes](./database-compatibility.en.md)
