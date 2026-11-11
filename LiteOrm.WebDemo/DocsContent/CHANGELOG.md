@@ -1,10 +1,18 @@
 # 变更日志 (Changelog)
 
+## v8.1.16 (2026-11-10)
+
+### 修复
+
+- **修复 `[TableJoin(AutoExpand = true)]` 未生效的 bug**（`LiteOrm.Common`）：多级关联表未展开的问题已解决，JIT 与 AOT 两条路径行为一致。
+
+***
+
 ## v8.1.15 (2026-11-10)
 
 ### 新特性
 
-- **新增 `LISTAGG` 聚合函数支持**（`LiteOrm.Common` / `LiteOrm`）：新增 `ExprExtensions.ListAgg` 扩展，按方言生成 `LISTAGG` / `GROUP_CONCAT` / `STRING_AGG` / `group_concat`，支持 `WITHIN GROUP` 排序与 `OVER` 窗口。
+- **新增 `StringAgg` 聚合函数支持**（`LiteOrm.Common` / `LiteOrm`）：新增 `ExprExtensions.StringAgg` 扩展，按方言生成 `LISTAGG` / `GROUP_CONCAT` / `STRING_AGG` / `group_concat`，支持 `WITHIN GROUP` 排序与 `OVER` 窗口。
 
 ### 破坏性变更
 

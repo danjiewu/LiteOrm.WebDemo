@@ -1,10 +1,18 @@
 # Changelog
 
+## v8.1.16 (2026-11-10)
+
+### Bug Fixes
+
+- **Fixed `[TableJoin(AutoExpand = true)]` having no effect** (`LiteOrm.Common`): nested joined tables are now expanded, with identical behavior on the JIT and AOT paths.
+
+***
+
 ## v8.1.15 (2026-11-10)
 
 ### New Features
 
-- **`LISTAGG` aggregate function support** (`LiteOrm.Common` / `LiteOrm`): the new `ExprExtensions.ListAgg` extension renders `LISTAGG` / `GROUP_CONCAT` / `STRING_AGG` / `group_concat` per dialect, with `WITHIN GROUP` ordering and `OVER` windows.
+- **`StringAgg` aggregate function support** (`LiteOrm.Common` / `LiteOrm`): the new `ExprExtensions.StringAgg` extension renders `LISTAGG` / `GROUP_CONCAT` / `STRING_AGG` / `group_concat` per dialect, with `WITHIN GROUP` ordering and `OVER` windows.
 
 ### Breaking changes
 
