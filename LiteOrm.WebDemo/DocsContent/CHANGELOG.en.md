@@ -1,6 +1,30 @@
 # Changelog
 
-## v8.1.16 (2026-11-10)
+## v8.2.1 (2026-11-16)
+
+### New Features
+
+- **Added the .NET 11 target framework** (`LiteOrm.Common` / `LiteOrm` / `LiteOrm.DependencyInjection` / `LiteOrm.Remote` / `LiteOrm.Remote.Server`).
+
+***
+
+## v8.1.18 (2026-11-12)
+
+### Bug Fixes
+
+- **Fixed a metadata build race** (`LiteOrm.Common`): a view is no longer generated twice and `TableDefinition.View` matches the cached view.
+- **Named-column caches are populated eagerly in constructors** (`LiteOrm.Common`): `SqlTable` / `JoinedTable` build the `property name → column` map at construction, removing the race where a concurrent first access could observe a partially populated dictionary and make `GetColumn` return null.
+- **`TableInfoProvider.Set` rejects null** (`LiteOrm.Common`): passing null throws `ArgumentNullException`.
+- **`CommonTableInfoProvider` is concurrency-safe** (`LiteOrm.Common`): `Register` is locked and `Install` is idempotent.
+
+### Improvements
+
+- **DI and the static `TableInfoProvider` share one instance** (`LiteOrm.DependencyInjection`): the container resolves `TableInfoProvider.Instance`.
+- **New `LiteOrmOptions.WaitForInit`** (`LiteOrm.DependencyInjection`): block on initialization or run it in the background; defaults to blocking.
+
+***
+
+## v8.1.16 (2026-11-11)
 
 ### Bug Fixes
 

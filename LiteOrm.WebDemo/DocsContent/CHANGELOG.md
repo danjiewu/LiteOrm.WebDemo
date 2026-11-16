@@ -1,6 +1,30 @@
 # 变更日志 (Changelog)
 
-## v8.1.16 (2026-11-10)
+## v8.2.1 (2026-11-16)
+
+### 新特性
+
+- **新增 .NET 11 目标框架**（`LiteOrm.Common` / `LiteOrm` / `LiteOrm.DependencyInjection` / `LiteOrm.Remote` / `LiteOrm.Remote.Server`）。
+
+***
+
+## v8.1.18 (2026-11-12)
+
+### 修复
+
+- **修复元数据并发构建缺陷**（`LiteOrm.Common`）：同一类型不再重复生成视图，`TableDefinition.View` 与缓存视图保持一致。
+- **列名缓存改为构造时一次性填充**（`LiteOrm.Common`）：`SqlTable` / `JoinedTable` 在构造时建立“属性名 → 列”映射，消除并发首次访问可能读到只填充了一部分的字典、使 `GetColumn` 返回 null 的风险。
+- **`TableInfoProvider.Set` 禁止传入 null**（`LiteOrm.Common`）：传入 null 抛 `ArgumentNullException`。
+- **`CommonTableInfoProvider` 并发安全**（`LiteOrm.Common`）：`Register` 加锁，`Install` 幂等。
+
+### 改进
+
+- **DI 与静态 `TableInfoProvider` 统一**（`LiteOrm.DependencyInjection`）：容器直接使用 `TableInfoProvider.Instance`。
+- **新增 `LiteOrmOptions.WaitForInit`**（`LiteOrm.DependencyInjection`）：初始化阻塞或后台执行，默认阻塞。
+
+***
+
+## v8.1.16 (2026-11-11)
 
 ### 修复
 
