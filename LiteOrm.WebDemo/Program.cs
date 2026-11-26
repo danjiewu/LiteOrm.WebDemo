@@ -1,3 +1,4 @@
+using Autofac;
 using LiteOrm.Remote.Server;
 using LiteOrm.DependencyInjection;
 using LiteOrm.SqlToExpr;
@@ -35,6 +36,13 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
+
+// 表结构同步由 RegisterLiteOrm 注册到 Autofac 容器的 LiteOrmCoreInitializer 完成。
+// seed 也放进同一个容器、且排在 RegisterLiteOrm 之后，保证建表先于种子数据写入。
+builder.Host.ConfigureContainer<ContainerBuilder>(container =>
+    container.RegisterType<DbInitializer>()
+        .As<IHostedService>()
+        .SingleInstance());
 
 var app = builder.Build();
 
@@ -95,12 +103,6 @@ static string BuildDocsUrl(string docPath, string lang)
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
-
-using (var scope = app.Services.CreateScope())
-{
-    await DbInitializer.InitializeAsync(scope.ServiceProvider);
-}
-
 app.MapDemoEndpoints();
 app.MapRemoteInvokeEndpoint();
 app.MapSqlToExprEndpoints();

@@ -1,20 +1,24 @@
-using LiteOrm.WebDemo.Models;
+using LiteOrm.Common;
 using LiteOrm.Service;
+using LiteOrm.WebDemo.Models;
 using LiteOrm.WebDemo.Services;
 
 namespace LiteOrm.WebDemo.Data;
 
-public static class DbInitializer
+public class DbInitializer(IServiceScopeFactory scopeFactory) : IHostedService
 {
-    public static async Task InitializeAsync(IServiceProvider services)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
+        using var scope = scopeFactory.CreateScope();
+        var services = scope.ServiceProvider;
+
         var departmentService = services.GetRequiredService<IDemoDepartmentService>();
         var userService = services.GetRequiredService<IDemoUserService>();
         var orderService = services.GetRequiredService<IDemoOrderService>();
 
-        var departmentCount = await departmentService.CountAsync();
-        var userCount = await userService.CountAsync();
-        var orderCount = await orderService.CountAsync();
+        var departmentCount = await departmentService.CountAsync(cancellationToken: cancellationToken);
+        var userCount = await userService.CountAsync(cancellationToken: cancellationToken);
+        var orderCount = await orderService.CountAsync(cancellationToken: cancellationToken);
 
         if (departmentCount > 0 && userCount > 0 && orderCount > 0)
         {
@@ -29,7 +33,7 @@ public static class DbInitializer
                 new DemoDepartment { Id = 2, Name = "Operations", Code = "OPS" },
                 new DemoDepartment { Id = 3, Name = "Key Accounts", Code = "KA" }
             };
-            await departmentService.BatchInsertAsync(departments);
+            await departmentService.BatchInsertAsync(departments, cancellationToken);
         }
 
         if (userCount == 0)
@@ -42,7 +46,7 @@ public static class DbInitializer
                 new DemoUser { Id = 4, UserName = "cathy", DisplayName = "Cathy Liu", Role = "Operations", DepartmentId = 2, PasswordHash = "n/a", PasswordSalt = "n/a", CreatedTime = DateTime.UtcNow.AddDays(-24) },
                 new DemoUser { Id = 5, UserName = "david", DisplayName = "David Zhao", Role = "AccountManager", DepartmentId = 3, PasswordHash = "n/a", PasswordSalt = "n/a", CreatedTime = DateTime.UtcNow.AddDays(-22) }
             };
-            await userService.BatchInsertAsync(users);
+            await userService.BatchInsertAsync(users, cancellationToken);
         }
 
         if (orderCount == 0)
@@ -82,7 +86,12 @@ public static class DbInitializer
                 })
                 .ToArray();
 
-            await orderService.BatchInsertAsync(orders);
+            await orderService.BatchInsertAsync(orders, cancellationToken);
         }
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await Task.CompletedTask;
     }
 }
