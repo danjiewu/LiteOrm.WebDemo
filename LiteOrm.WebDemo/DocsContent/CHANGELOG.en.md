@@ -1,5 +1,38 @@
 # Changelog
 
+## v8.2.4 (2026-11-26)
+
+### Breaking Changes
+
+- **`LiteOrmCodeGenKind.None` renamed to `Default`** (`LiteOrm.Common`): `Default` (0) behaves like the attribute not being declared, auto-detecting from AOT build properties; existing `None` usages must switch to `Default`.
+
+### New Features
+
+- **Server-side request interceptors** (`LiteOrm.Remote.Server`): added `IRemoteInvocationInterceptor` to run authentication, authorization, auditing, etc. before remote dispatch, with short-circuiting and a custom status code.
+- **Added `LiteOrmCodeGenKind.Never`** (`LiteOrm.Common`): explicitly disables source generation, even under an AOT build; takes precedence when combined with other flags.
+
+### Fixes
+
+- **Removed AOT/trimming publish warnings** (`LiteOrm.Common` / `LiteOrm.Generators`): fixed the `IL2068` / `IL2110` / `IL2111` trim warnings, so `PublishTrimmed` / NativeAOT publishes no longer report them.
+
+***
+
+## v8.2.3 (2026-11-25)
+
+### New Features
+
+- **Independently configurable read-only pools** (`LiteOrm`): added `ReadOnlyDAOContextPool`; each read-only replica can now set its own pool parameters such as `FailureLimit` / `Cooldown` under `ReadOnlyConfigs`.
+
+### Improvements
+
+- **Constant short-circuiting in Lambda conversion** (`LiteOrm.Common`): `&&` / `||` short-circuit when one side is a compile-time constant, and `?:` only converts the matching branch when its condition is constant, avoiding redundant SQL.
+
+### Fixes
+
+- **Fixed PublishTrimmed build failure** (`LiteOrm.Common`): `IQuerySourceExecutor<T>` and `QuerySourceExtensions.AsSource<T>` now carry `DynamicallyAccessedMembers` annotations aligned with `ObjectViewDAO<T>`, removing the DI validation error caused by inconsistent annotations on open generic registrations.
+
+***
+
 ## v8.2.2 (2026-11-17)
 
 ### Breaking Changes

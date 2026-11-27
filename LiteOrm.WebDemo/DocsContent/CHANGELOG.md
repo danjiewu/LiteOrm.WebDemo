@@ -1,5 +1,38 @@
 # 变更日志 (Changelog)
 
+## v8.2.4 (2026-11-26)
+
+### 破坏性变更
+
+- **`LiteOrmCodeGenKind.None` 重命名为 `Default`**（`LiteOrm.Common`）：`Default`（0）与未声明等价，按 AOT 构建属性自动判定；原 `None` 需改用 `Default`。
+
+### 新特性
+
+- **服务端请求拦截器**（`LiteOrm.Remote.Server`）：新增 `IRemoteInvocationInterceptor`，可在远程调用分发前执行认证、权限、审计等逻辑，支持短路并自定义状态码。
+- **新增 `LiteOrmCodeGenKind.Never`**（`LiteOrm.Common`）：显式关闭源生成，AOT 构建下同样不生成；与其他位组合时优先。
+
+### 修复
+
+- **消除 AOT/裁剪发布告警**（`LiteOrm.Common` / `LiteOrm.Generators`）：修复 `IL2068` / `IL2110` / `IL2111` 修剪告警，`PublishTrimmed` / NativeAOT 发布不再输出。
+
+***
+
+## v8.2.3 (2026-11-25)
+
+### 新特性
+
+- **只读连接池独立配置**（`LiteOrm`）：新增 `ReadOnlyDAOContextPool`，只读库在 `ReadOnlyConfigs` 中可单独设置 `FailureLimit` / `Cooldown` 等连接池参数。
+
+### 改进
+
+- **Lambda 解析支持常量短路**（`LiteOrm.Common`）：`&&` / `||` 一侧为编译期常量时短路，`?:` 条件为常量时只解析命中分支，避免生成冗余 SQL。
+
+### 修复
+
+- **修复 PublishTrimmed 构建失败**（`LiteOrm.Common`）：`IQuerySourceExecutor<T>` 与 `QuerySourceExtensions.AsSource<T>` 补充 `DynamicallyAccessedMembers` 注解，与 `ObjectViewDAO<T>` 对齐，消除 DI 校验开放泛型注册注解不一致的问题。
+
+***
+
 ## v8.2.2 (2026-11-17)
 
 ### 破坏性变更
